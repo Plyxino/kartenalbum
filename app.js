@@ -253,11 +253,14 @@ async function lesungVerarbeiten(nummer, karte){
   if (!nummer) { g.hidden = true; return; }
   g.textContent = nummer.anzeige; g.hidden = false;
   if (Z.ignoriere === nummer.anzeige && Date.now() < Z.ignoriereBis) return;
-  // Die letzten Lesungen merken: zweimal dieselbe Nummer innerhalb der letzten vier Lesungen reicht
+  // Eine Nummer gilt erst, wenn sie zweimal gleich gelesen wurde (innerhalb der letzten vier Lesungen).
+  // Eine einzelne Lesung reicht nie: eine 5 sieht schnell wie eine 8 aus, und 18/18 passt genauso gut zu einem Set wie 15/18.
   Z.lesungen.push(nummer.anzeige); if (Z.lesungen.length > 4) Z.lesungen.shift();
   const gleiche = Z.lesungen.filter(x => x === nummer.anzeige).length;
+  if (gleiche < 2) { if (gleiche === 1) scanStatusSetzen(nummer.anzeige + ' gelesen, kurz still halten …'); return; }
   const plausibel = await nennerPlausibel(nummer);
-  if (gleiche >= 2 || (plausibel && nummer.sicher)) { Z.lesungen = []; await nummerErkannt(nummer, karte); }
+  if (!plausibel && !nummer.sicher && gleiche < 3) { scanStatusSetzen(nummer.anzeige + ' gelesen, bin noch nicht sicher …'); return; }
+  Z.lesungen = []; await nummerErkannt(nummer, karte);
 }
 async function nennerPlausibel(nummer){
   if (nummer.promo) return true;
@@ -276,33 +279,42 @@ function ocrBereit(){
   scanStatusSetzen('Lade Texterkennung (einmalig) …');
   ocrLaden = (async () => {
     const w = await Tesseract.createWorker('eng', 1, { logger: () => {} });
-    await w.setParameters({ tessedit_char_whitelist: '0123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ ', tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' });
+    await w.setParameters({ tessedit_char_whitelist: ZEICHEN_NUMMER, tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' });
     ocrWorker = w; return w;
   })();
   ocrLaden.catch(() => { ocrLaden = null; });
   return ocrLaden;
 }
-/* Streifen: unterer Teil der Karte als Schwarz-Weiß-Bild. Teil = ganz, links oder rechts. */
+/* Ein Ausschnitt der Karte als Schwarz-Weiß-Bild (vergrößert, lokale Schwelle, helle Schrift wird umgedreht). */
+function schwarzweiss(karte, sx, sy, sw, sh, zielBreite){
+  const faktor = zielBreite / sw, rand = 24;
+  const zw = Math.round(sw * faktor), zh = Math.round(sh * faktor);
+  const ziel = document.createElement('canvas'); ziel.width = zw + 2 * rand; ziel.height = zh + 2 * rand;
+  const c = ziel.getContext('2d'); c.imageSmoothingQuality = 'high';
+  c.fillStyle = '#ffffff'; c.fillRect(0, 0, ziel.width, ziel.height);
+  c.drawImage(karte, sx, sy, sw, sh, rand, rand, zw, zh);
+  const img = c.getImageData(rand, rand, zw, zh); const p = img.data; const n = zw * zh;
+  const grau = new Uint8ClampedArray(n);
+  for (let i = 0, j = 0; i < p.length; i += 4, j++) grau[j] = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000;
+  const bw = adaptiveSchwelle(grau, zw, zh, 31, 10);
+  let schwarz = 0; for (let j = 0; j < n; j++) if (bw[j] === 0) schwarz++;
+  const umdrehen = schwarz > n / 2; // Schrift ist die Minderheit: helle Schrift auf dunklem Grund umdrehen
+  for (let i = 0, j = 0; i < p.length; i += 4, j++) { const v = umdrehen ? 255 - bw[j] : bw[j]; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
+  c.putImageData(img, rand, rand);
+  return ziel;
+}
+/* Streifen: unterer Teil der Karte (dort steht die Nummer). Teil = ganz, links oder rechts. */
 function streifenMachen(karte, teil){
   const W = karte.width, H = karte.height;
   const sy = Math.round(H * 0.83), sh = H - sy;
   const bereiche = { ganz: [0, W], links: [0, Math.round(W * 0.58)], rechts: [Math.round(W * 0.42), W] };
-  const b = bereiche[teil] || bereiche.ganz; const bx = b[0], bw = b[1] - b[0];
-  const faktor = 1500 / W, rand = 24;
-  const zw = Math.round(bw * faktor), zh = Math.round(sh * faktor);
-  const ziel = document.createElement('canvas'); ziel.width = zw + 2 * rand; ziel.height = zh + 2 * rand;
-  const c = ziel.getContext('2d'); c.imageSmoothingQuality = 'high';
-  c.fillStyle = '#ffffff'; c.fillRect(0, 0, ziel.width, ziel.height);
-  c.drawImage(karte, bx, sy, bw, sh, rand, rand, zw, zh);
-  const img = c.getImageData(rand, rand, zw, zh); const p = img.data; const n = zw * zh;
-  const grau = new Uint8ClampedArray(n);
-  for (let i = 0, j = 0; i < p.length; i += 4, j++) grau[j] = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000;
-  const sw = adaptiveSchwelle(grau, zw, zh, 31, 10);
-  let schwarz = 0; for (let j = 0; j < n; j++) if (sw[j] === 0) schwarz++;
-  const umdrehen = schwarz > n / 2; // Schrift ist die Minderheit: helle Schrift auf dunklem Grund umdrehen
-  for (let i = 0, j = 0; i < p.length; i += 4, j++) { const v = umdrehen ? 255 - sw[j] : sw[j]; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
-  c.putImageData(img, rand, rand);
-  return ziel;
+  const b = bereiche[teil] || bereiche.ganz;
+  return schwarzweiss(karte, b[0], sy, b[1] - b[0], sh, 1500 * (b[1] - b[0]) / W);
+}
+/* Namensstreifen: oberer Rand der Karte, dort steht der Name (hinter „Basis“/„Phase“, vor den KP). */
+function namensStreifen(karte){
+  const W = karte.width, H = karte.height;
+  return schwarzweiss(karte, 0, Math.round(H * 0.02), Math.round(W * 0.84), Math.round(H * 0.095), 1500 * 0.84);
 }
 function adaptiveSchwelle(grau, w, h, fenster, abzug){
   const W1 = w + 1; const integ = new Float64Array(W1 * (h + 1));
@@ -324,9 +336,9 @@ async function nummerAusKarte(karte){
   const texte = [];
   for (const teil of ['ganz', 'links', 'rechts']) {
     const streifen = streifenMachen(karte, teil);
-    const erg = await w.recognize(streifen);
-    const nummer = nummerParsen(erg.data.text);
-    texte.push('[' + teil + '] ' + String(erg.data.text || '').trim().replace(/\s+/g, ' ').slice(0, 120));
+    const text = await textLesen(w, streifen, ZEICHEN_NUMMER);
+    const nummer = nummerParsen(text);
+    texte.push('[' + teil + '] ' + text.trim().replace(/\s+/g, ' ').slice(0, 120));
     if (Z.debug) debugZeigen(streifen, texte, nummer);
     if (nummer) return nummer;
   }
@@ -355,6 +367,56 @@ function nummerParsen(text){
   return null;
 }
 
+
+/* ---------- Namen oben auf der Karte lesen und mit der Datenbank vergleichen ---------- */
+const ZEICHEN_NUMMER = '0123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ ';
+const ZEICHEN_NAME = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüéÉ\'-. ';
+let ocrZeichen = ZEICHEN_NUMMER;
+async function textLesen(w, bild, zeichen){
+  if (ocrZeichen !== zeichen) { await w.setParameters({ tessedit_char_whitelist: zeichen, tessedit_pageseg_mode: zeichen === ZEICHEN_NAME ? '7' : '6' }); ocrZeichen = zeichen; }
+  const erg = await w.recognize(bild); return String(erg.data.text || '');
+}
+async function nameAusKarte(karte){
+  try { const w = await ocrBereit(); return await textLesen(w, namensStreifen(karte), ZEICHEN_NAME); } catch (e) { return ''; }
+}
+function buchstaben(s){
+  return String(s || '').toUpperCase().replace(/Ä/g, 'A').replace(/Ö/g, 'O').replace(/Ü/g, 'U').replace(/É|È/g, 'E').replace(/[^A-Z]/g, '');
+}
+function editAbstand(a, b){
+  const m = a.length, n = b.length; if (!m) return n; if (!n) return m;
+  let vorher = new Array(n + 1), jetzt = new Array(n + 1);
+  for (let j = 0; j <= n; j++) vorher[j] = j;
+  for (let i = 1; i <= m; i++) {
+    jetzt[0] = i;
+    for (let j = 1; j <= n; j++) jetzt[j] = Math.min(vorher[j] + 1, jetzt[j - 1] + 1, vorher[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    const t = vorher; vorher = jetzt; jetzt = t;
+  }
+  return vorher[n];
+}
+/* Wie gut passt der Kartenname in den gelesenen Text? 1 = perfekt, 0 = gar nicht. Fenster über den Text schieben. */
+function namensAehnlichkeit(gelesen, name){
+  const t = buchstaben(gelesen), z = buchstaben(name);
+  if (z.length < 3 || t.length < 3) return 0;
+  let best = Infinity;
+  for (const laenge of [z.length - 1, z.length, z.length + 1]) {
+    if (laenge < 2) continue;
+    if (t.length <= laenge) { best = Math.min(best, editAbstand(t, z)); continue; }
+    for (let i = 0; i + laenge <= t.length; i++) best = Math.min(best, editAbstand(t.slice(i, i + laenge), z));
+  }
+  return Math.max(0, 1 - best / z.length);
+}
+/* Kandidaten nach Namen bewerten. Rückgabe: Liste mit .passung (0..1), absteigend sortiert, plus Urteil über den besten. */
+function namenAbgleichen(gelesen, kandidaten){
+  const lesbar = buchstaben(gelesen).length >= 4;
+  const liste = kandidaten.map(k => ({ karte: k, passung: lesbar ? namensAehnlichkeit(gelesen, k.name) : 0 }));
+  liste.sort((a, b) => b.passung - a.passung);
+  const beste = liste[0] ? liste[0].passung : 0, zweite = liste[1] ? liste[1].passung : 0;
+  let urteil = 'unklar';
+  if (lesbar && beste >= 0.65 && (beste - zweite >= 0.2 || liste.length === 1)) urteil = 'passt';
+  else if (lesbar && beste < 0.4) urteil = 'passt nicht';
+  return { liste: liste, urteil: urteil, lesbar: lesbar, beste: beste };
+}
+
 /* ---------- Kartendatenbank (TCGdex, kostenlos) ---------- */
 const DB = { basis: 'https://api.tcgdex.net/v2', sets: {}, setDetails: {} };
 async function setsLaden(sprache){
@@ -380,7 +442,7 @@ async function kandidatenSuchen(nummer){
     const genau = passend.length > 0;
     if (!passend.length) passend = karten;
     passend.sort((a, b) => (idx.get(b.setId) || 0) - (idx.get(a.setId) || 0));
-    return { passend: passend.slice(0, 12), sprache: sprache, genau: genau };
+    return { passend: passend, sprache: sprache, genau: genau };
   }
   return { passend: [], sprache: 'de', genau: false };
 }
@@ -417,7 +479,26 @@ async function nummerErkannt(nummer, karteCanvas){
   try {
     const erg = await kandidatenSuchen(nummer);
     if (!erg.passend.length) { ergebnisLeer(nummer, foto); return; }
+    // Gegenprobe: Der Name oben auf der Karte muss zur gefundenen Karte passen.
+    const gelesenerName = karteCanvas ? await nameAusKarte(karteCanvas) : '';
+    const ab = namenAbgleichen(gelesenerName, erg.passend);
+    if (Z.debug) $('#debugText').textContent += '\n[name] ' + gelesenerName.trim().replace(/\s+/g, ' ').slice(0, 80) + ' → ' + ab.urteil + (ab.liste[0] ? ' (' + ab.liste[0].karte.name + ' ' + Math.round(ab.liste[0].passung * 100) + ' %)' : '');
+    if (ab.urteil === 'passt nicht') {
+      // Nummer wahrscheinlich falsch gelesen (z. B. 15 als 18). Noch einmal von vorn lesen; beim dritten Mal darf Sean selbst wählen.
+      Z.namensAblehnung = (Z.namensAblehnung && Z.namensAblehnung.nummer === nummer.anzeige) ? { nummer: nummer.anzeige, anzahl: Z.namensAblehnung.anzahl + 1 } : { nummer: nummer.anzeige, anzahl: 1 };
+      if (Z.namensAblehnung.anzahl < 3) {
+        scanStatusSetzen('Nummer ' + nummer.anzeige + ' gelesen, aber der Name oben passt nicht zu „' + ab.liste[0].karte.name + '“. Ich lese noch einmal, kurz still halten …');
+        Z.lesungen = []; Z.pause = false; rahmen.classList.remove('treffer');
+        return;
+      }
+      erg.passend = ab.liste.map(x => x.karte);
+      kandidatenZeigen(erg, foto, nummer, 'Der Name oben auf der Karte passt zu keiner davon. Vielleicht wurde die Nummer falsch gelesen. Ist deine Karte dabei?');
+      return;
+    }
+    Z.namensAblehnung = null;
+    if (ab.urteil === 'passt') { ergebnisZeigen(await karteAusDb(ab.liste[0].karte, erg.sprache), foto); return; }
     if (erg.passend.length === 1 && erg.genau) { ergebnisZeigen(await karteAusDb(erg.passend[0], erg.sprache), foto); return; }
+    erg.passend = ab.liste.map(x => x.karte);
     kandidatenZeigen(erg, foto, nummer);
   } catch (e) {
     scanStatusSetzen('Kartendatenbank nicht erreichbar. Prüfe das Internet.'); toast('Kartendatenbank nicht erreichbar.', 3500);
@@ -434,15 +515,15 @@ function ergebnisGrund(foto){
   Z.aktuellBild = foto || '';
   e.scrollIntoView({ behavior: ruhig ? 'auto' : 'smooth', block: 'start' });
 }
-function kandidatenZeigen(erg, foto, nummer){
+function kandidatenZeigen(erg, foto, nummer, hinweis){
   Z.aktuell = null;
   ergebnisGrund(foto);
   $('#ergName').textContent = 'Nummer ' + nummer.anzeige;
-  $('#ergZeile1').textContent = erg.genau ? 'Mehrere Sets passen. Welche ist es?' : 'Kein Set mit genau dieser Gesamtzahl gefunden. Vielleicht eine davon:';
+  $('#ergZeile1').textContent = hinweis || (erg.genau ? 'Mehrere Sets passen. Welche ist es?' : 'Kein Set mit genau dieser Gesamtzahl gefunden. Vielleicht eine davon:');
   $('#ergZeile2').textContent = ''; $('#ergZeile3').textContent = '';
   const u = $('#urteil'); u.className = 'urteil unklar'; u.innerHTML = '<h3>Tippe auf die richtige Karte</h3><p>Vergleiche das Bild mit deiner Karte.</p>';
   const liste = $('#kandidatenListe'); $('#kandidaten').hidden = false;
-  erg.passend.forEach(k => {
+  erg.passend.slice(0, 12).forEach(k => {
     const b = document.createElement('button'); b.type = 'button'; b.className = 'kandidat';
     b.innerHTML = (k.image ? '<img src="' + esc(k.image) + '/low.webp" alt="" loading="lazy">' : '<div class="platz" style="aspect-ratio:63/88;border-radius:6px;background:var(--flaeche2)"></div>') +
       '<span>' + esc(k.name) + '</span><span class="hinweis">' + esc(k.set ? k.set.name : k.setId) + '</span>';
@@ -821,4 +902,6 @@ async function start(){
   }
 }
 start();
+// Nur zum Testen am PC (localhost): Lesefunktionen von außen erreichbar machen.
+if (location.hostname === 'localhost') window.__kartenTest = { nummerAusKarte, nameAusKarte, namenAbgleichen, namensAehnlichkeit, nummerErkannt, nummerParsen, streifenMachen, namensStreifen, Z };
 })();
