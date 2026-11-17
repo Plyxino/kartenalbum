@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Kartenalbum">
+<meta name="theme-color" content="#d3302f">
+<title>Pokémon Kartenalbum</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-512.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500&family=Nunito:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="kopf">
+  <div class="marke"><span class="ball" aria-hidden="true"></span><h1>Kartenalbum</h1></div>
+  <div class="konto" id="kopfKonto" hidden>
+    <span id="kopfName"></span>
+    <button class="leise" id="knopfAbmelden" type="button">Abmelden</button>
+  </div>
+</header>
+
+<main>
+  <!-- Anmelden -->
+  <section class="seite" id="seiteAnmelden">
+    <div class="box anmelde">
+      <h2>Deine Sammlung</h2>
+      <p class="hinweis">Melde dich an oder erstelle ein Konto. Danach hältst du jede Karte einfach vor die Kamera, und die App sagt dir sofort, ob du sie schon hast.</p>
+      <div class="tabs" role="tablist">
+        <button type="button" class="aktiv" data-form="anmelden">Anmelden</button>
+        <button type="button" data-form="erstellen">Konto erstellen</button>
+      </div>
+      <form id="formAnmelden" autocomplete="on">
+        <label class="feld">Name<input type="text" id="anName" autocomplete="username" required maxlength="24"></label>
+        <label class="feld">PIN<input type="password" id="anPin" inputmode="numeric" autocomplete="current-password" required minlength="4"></label>
+        <p class="fehler" id="anFehler"></p>
+        <button class="haupt" type="submit" id="anKnopf">Anmelden</button>
+      </form>
+      <form id="formErstellen" hidden autocomplete="on">
+        <label class="feld">Name (so heißt dein Konto)<input type="text" id="erName" autocomplete="username" required minlength="2" maxlength="24"></label>
+        <label class="feld">PIN (mindestens 4 Zeichen)<input type="password" id="erPin" inputmode="numeric" autocomplete="new-password" required minlength="4"></label>
+        <label class="feld">PIN noch einmal<input type="password" id="erPin2" inputmode="numeric" autocomplete="new-password" required minlength="4"></label>
+        <p class="fehler" id="erFehler"></p>
+        <button class="haupt" type="submit" id="erKnopf">Konto erstellen</button>
+      </form>
+      <p class="hinweis" id="speicherHinweis">Die Sammlung wird auf diesem Gerät gespeichert. Mit „Sichern“ in der Sammlung kannst du sie als Datei weitergeben.</p>
+    </div>
+  </section>
+
+  <!-- App -->
+  <section class="seite" id="seiteApp" hidden>
+    <div class="kacheln" id="kacheln">
+      <div class="kachel"><div class="zahl" id="zahlGesamt">0</div><div class="was">Karten insgesamt</div></div>
+      <div class="kachel"><div class="zahl" id="zahlVerschieden">0</div><div class="was">verschiedene</div></div>
+      <div class="kachel"><div class="zahl" id="zahlDoppelt">0</div><div class="was">doppelt, zum Tauschen</div></div>
+    </div>
+
+    <!-- Scanner (Scannen, Tauschen, Löschen) -->
+    <div class="box scanbox" id="scanBox">
+      <p class="modus-erkl" id="scanErkl"></p>
+      <div class="scanner" id="scanner">
+        <video id="video" playsinline muted autoplay></video>
+        <img id="standbild" alt="" hidden>
+        <div class="rahmen" id="rahmen"><span class="ecke lo"></span><span class="ecke ro"></span><span class="ecke lu"></span><span class="ecke ru"></span><span class="strahl" id="strahl" hidden></span></div>
+        <div class="scanstatus" id="scanStatus">Kamera ist aus</div>
+        <div class="gelesen" id="gelesen" hidden></div>
+      </div>
+      <div class="scan-leiste">
+        <button type="button" class="haupt" id="knopfKamera">Kamera starten</button>
+        <label class="zweit knopf-datei" tabindex="0" id="labelBild">Bild wählen<input type="file" accept="image/*" id="dateiBild" hidden></label>
+        <button type="button" class="leise" id="knopfLicht" hidden>Licht</button>
+        <button type="button" class="leise" id="knopfWechsel" hidden>Kamera wechseln</button>
+      </div>
+      <div class="scan-optionen">
+        <label class="schalter"><input type="checkbox" id="schnellmodus"><span>Schnellmodus: neue Karten sofort speichern, Doppelte nur melden</span></label>
+        <form class="manuell" id="formManuell"><input type="text" id="manuellNummer" placeholder="Nummer von Hand, z. B. 025/198" aria-label="Kartennummer"><button type="submit" class="zweit">Suchen</button></form>
+      </div>
+
+      <!-- Ergebnis -->
+      <div class="ergebnis" id="ergebnis" hidden>
+        <div class="ergebnis-kopf">
+          <div class="bilder">
+            <img id="ergBildDb" alt="Karte aus der Datenbank" hidden>
+            <img id="ergFoto" alt="Dein Foto" hidden>
+            <div class="platz" id="ergPlatz">kein Bild</div>
+          </div>
+          <div class="info">
+            <h3 id="ergName">Karte</h3>
+            <p id="ergZeile1" class="hinweis"></p>
+            <p id="ergZeile2" class="hinweis"></p>
+            <p id="ergZeile3" class="hinweis"></p>
+          </div>
+        </div>
+        <div class="kandidaten" id="kandidaten" hidden>
+          <p class="hinweis">Mehrere Karten haben diese Nummer. Tippe auf deine:</p>
+          <div class="kandidaten-liste" id="kandidatenListe"></div>
+        </div>
+        <div class="urteil unklar" id="urteil"></div>
+        <div class="aktionen" id="aktionen"></div>
+      </div>
+    </div>
+
+    <!-- Sammlung -->
+    <div class="box" id="suchBox" hidden>
+      <div class="suchleiste">
+        <input type="search" id="suchFeld" placeholder="Name, Nummer, Set, Typ, Jahr …" aria-label="Suchen">
+        <select id="sortierung" aria-label="Sortierung">
+          <option value="neu">Zuletzt hinzugefügt</option>
+          <option value="name">Name A–Z</option>
+          <option value="nummer">Nummer</option>
+          <option value="jahr">Jahr (alt zuerst)</option>
+          <option value="anzahl">Anzahl (meiste zuerst)</option>
+        </select>
+      </div>
+      <div class="chips" id="chips"></div>
+      <p class="hinweis" id="suchAnzahl" style="margin-top:10px"></p>
+      <div class="raster" id="raster"></div>
+      <div class="sichern">
+        <button type="button" class="zweit" id="knopfSichern">Sammlung sichern (Datei)</button>
+        <label class="zweit knopf-datei" tabindex="0">Sicherung laden<input type="file" accept="application/json,.json" id="dateiSicherung" hidden></label>
+      </div>
+    </div>
+
+    <!-- Tauschliste -->
+    <div class="box" id="tauschBox" hidden>
+      <h3>Deine Tauschliste</h3>
+      <p class="hinweis">Alles, was du mehr als einmal hast. Die kannst du weggeben.</p>
+      <div class="liste" id="tauschListe"></div>
+    </div>
+
+    <!-- Löschen-Liste -->
+    <div class="box" id="loeschBox" hidden>
+      <h3>Oder aus der Liste löschen</h3>
+      <input type="search" id="loeschSuche" placeholder="Karte suchen …" aria-label="Karte suchen" style="margin-top:10px">
+      <div class="liste" id="loeschListe"></div>
+    </div>
+  </section>
+</main>
+
+<nav class="modi" id="modi" aria-label="Modus" hidden>
+  <button type="button" data-modus="scannen" class="aktiv"><span class="pkt"></span>Scannen</button>
+  <button type="button" data-modus="suchen"><span class="pkt"></span>Sammlung</button>
+  <button type="button" data-modus="tauschen"><span class="pkt"></span>Tauschen</button>
+  <button type="button" data-modus="loeschen"><span class="pkt"></span>Löschen</button>
+</nav>
+
+<canvas id="konfetti" aria-hidden="true"></canvas>
+<dialog id="dialog"><div class="dialog-inhalt" id="dialogInhalt"></div></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
