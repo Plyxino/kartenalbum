@@ -9,7 +9,7 @@ const ruhig = window.matchMedia && window.matchMedia('(prefers-reduced-motion: r
 const Z = {
   konto:null, karten:[], modus:'scannen',
   aktuell:null, aktuellBild:'', aktuellTreffer:null, letztesUrteil:'',
-  pause:false, letzteLesung:'', lesungZaehler:0, ignoriere:'', ignoriereBis:0, autoTimer:null,
+  pause:false, letzteLesung:'', lesungZaehler:0, lesungen:[], ignoriere:'', ignoriereBis:0, autoTimer:null, debug:false,
   suche:'', sortierung:'neu', typFilter:'', loeschSuche:''
 };
 const FELDER = ['name','nummer','setname','setcode','setId','localId','jahr','datum','serie','seltenheit','typ','kp','art','stufe','besonderheit','sprache','illustrator','bildDb'];
@@ -179,7 +179,7 @@ async function kameraStarten(){
   kameraStoppen(); audioAn();
   scanStatusSetzen('Kamera startet …');
   try {
-    Kamera.strom = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: Kamera.richtung }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    Kamera.strom = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: Kamera.richtung }, width: { ideal: 3840 }, height: { ideal: 2160 } }, audio: false });
   } catch (e) {
     scanStatusSetzen(e && e.name === 'NotAllowedError' ? 'Kamera nicht erlaubt. Erlaube sie in den Einstellungen des Browsers.' : 'Kamera konnte nicht gestartet werden. Nimm „Bild wählen“.');
     return;
@@ -188,6 +188,7 @@ async function kameraStarten(){
   try { await video.play(); } catch (e) {}
   Kamera.spur = Kamera.strom.getVideoTracks()[0]; Kamera.aktiv = true;
   const faehig = Kamera.spur && Kamera.spur.getCapabilities ? Kamera.spur.getCapabilities() : {};
+  try { if (faehig.focusMode && faehig.focusMode.includes('continuous')) await Kamera.spur.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
   $('#knopfLicht').hidden = !faehig.torch; $('#knopfWechsel').hidden = false;
   $('#knopfKamera').textContent = 'Kamera stoppen'; $('#strahl').hidden = false;
   scanStatusSetzen('Halte die Karte in den Rahmen');
@@ -209,7 +210,7 @@ $('#knopfLicht').addEventListener('click', async () => {
   try { await Kamera.spur.applyConstraints({ advanced: [{ torch: Kamera.licht }] }); } catch (e) { toast('Licht geht bei dieser Kamera nicht.'); }
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) kameraStoppen(); });
-function schleifeStarten(){ clearInterval(Kamera.timer); Kamera.timer = setInterval(scanSchritt, 650); }
+function schleifeStarten(){ clearInterval(Kamera.timer); Kamera.timer = setInterval(scanSchritt, 400); }
 
 function quellRahmen(qw, qh){
   const bw = scanner.clientWidth, bh = scanner.clientHeight;
@@ -220,8 +221,9 @@ function quellRahmen(qw, qh){
 }
 function rahmenAusschneiden(quelle, qw, qh){
   const r = quellRahmen(qw, qh);
-  const c = document.createElement('canvas'); c.width = 756; c.height = 1056;
-  c.getContext('2d').drawImage(quelle, r.sx, r.sy, r.sw, r.sh, 0, 0, 756, 1056);
+  const c = document.createElement('canvas'); c.width = 1008; c.height = 1408;
+  const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(quelle, r.sx, r.sy, r.sw, r.sh, 0, 0, 1008, 1408);
   return c;
 }
 function miniatur(canvas){
@@ -236,6 +238,12 @@ async function scanSchritt(){
   try {
     const karte = rahmenAusschneiden(video, video.videoWidth, video.videoHeight);
     const nummer = await nummerAusKarte(karte);
+    if (nummer) Kamera.fehlversuche = 0; else if (!Z.pause) {
+      Kamera.fehlversuche = (Kamera.fehlversuche || 0) + 1;
+      if (Kamera.fehlversuche === 6) scanStatusSetzen('Tipp: Karte flach hinlegen, näher ran, bis sie den Rahmen füllt, und gutes Licht ohne Spiegelung.');
+      if (Kamera.fehlversuche === 14) scanStatusSetzen('Die Nummer unten muss scharf sein. Kurz still halten, oder unten von Hand eintippen.');
+      if (Kamera.fehlversuche > 20) Kamera.fehlversuche = 0;
+    }
     await lesungVerarbeiten(nummer, karte);
   } catch (e) { /* nächster Versuch */ }
   finally { Kamera.beschaeftigt = false; }
@@ -244,9 +252,19 @@ async function lesungVerarbeiten(nummer, karte){
   const g = $('#gelesen');
   if (!nummer) { g.hidden = true; return; }
   g.textContent = nummer.anzeige; g.hidden = false;
-  if (nummer.anzeige === Z.letzteLesung) Z.lesungZaehler++; else { Z.letzteLesung = nummer.anzeige; Z.lesungZaehler = 1; }
   if (Z.ignoriere === nummer.anzeige && Date.now() < Z.ignoriereBis) return;
-  if (Z.lesungZaehler >= 2) { Z.lesungZaehler = 0; await nummerErkannt(nummer, karte); }
+  // Die letzten Lesungen merken: zweimal dieselbe Nummer innerhalb der letzten vier Lesungen reicht
+  Z.lesungen.push(nummer.anzeige); if (Z.lesungen.length > 4) Z.lesungen.shift();
+  const gleiche = Z.lesungen.filter(x => x === nummer.anzeige).length;
+  const plausibel = await nennerPlausibel(nummer);
+  if (gleiche >= 2 || (plausibel && nummer.sicher)) { Z.lesungen = []; await nummerErkannt(nummer, karte); }
+}
+async function nennerPlausibel(nummer){
+  if (nummer.promo) return true;
+  try {
+    const sets = await setsLaden('de');
+    return sets.some(s => s.cardCount && (s.cardCount.official === nummer.nenner || s.cardCount.total === nummer.nenner));
+  } catch (e) { return true; }
 }
 
 /* ---------- Texterkennung ---------- */
@@ -264,24 +282,61 @@ function ocrBereit(){
   ocrLaden.catch(() => { ocrLaden = null; });
   return ocrLaden;
 }
-function streifenMachen(karte, invertieren){
-  const W = karte.width, H = karte.height; const sy = Math.round(H * 0.85), sh = H - sy;
-  const ziel = document.createElement('canvas'); ziel.width = 1600; ziel.height = Math.round(sh * 1600 / W);
+/* Streifen: unterer Teil der Karte als Schwarz-Weiß-Bild. Teil = ganz, links oder rechts. */
+function streifenMachen(karte, teil){
+  const W = karte.width, H = karte.height;
+  const sy = Math.round(H * 0.83), sh = H - sy;
+  const bereiche = { ganz: [0, W], links: [0, Math.round(W * 0.58)], rechts: [Math.round(W * 0.42), W] };
+  const b = bereiche[teil] || bereiche.ganz; const bx = b[0], bw = b[1] - b[0];
+  const faktor = 1500 / W, rand = 24;
+  const zw = Math.round(bw * faktor), zh = Math.round(sh * faktor);
+  const ziel = document.createElement('canvas'); ziel.width = zw + 2 * rand; ziel.height = zh + 2 * rand;
   const c = ziel.getContext('2d'); c.imageSmoothingQuality = 'high';
-  c.drawImage(karte, 0, sy, W, sh, 0, 0, ziel.width, ziel.height);
-  const img = c.getImageData(0, 0, ziel.width, ziel.height); const p = img.data; let min = 255, max = 0;
-  for (let i = 0; i < p.length; i += 4) { const g = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000; p[i] = g; if (g < min) min = g; if (g > max) max = g; }
-  const span = Math.max(1, max - min);
-  for (let i = 0; i < p.length; i += 4) { let v = (p[i] - min) * 255 / span; if (invertieren) v = 255 - v; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
-  c.putImageData(img, 0, 0); return ziel;
+  c.fillStyle = '#ffffff'; c.fillRect(0, 0, ziel.width, ziel.height);
+  c.drawImage(karte, bx, sy, bw, sh, rand, rand, zw, zh);
+  const img = c.getImageData(rand, rand, zw, zh); const p = img.data; const n = zw * zh;
+  const grau = new Uint8ClampedArray(n);
+  for (let i = 0, j = 0; i < p.length; i += 4, j++) grau[j] = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000;
+  const sw = adaptiveSchwelle(grau, zw, zh, 31, 10);
+  let schwarz = 0; for (let j = 0; j < n; j++) if (sw[j] === 0) schwarz++;
+  const umdrehen = schwarz > n / 2; // Schrift ist die Minderheit: helle Schrift auf dunklem Grund umdrehen
+  for (let i = 0, j = 0; i < p.length; i += 4, j++) { const v = umdrehen ? 255 - sw[j] : sw[j]; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
+  c.putImageData(img, rand, rand);
+  return ziel;
+}
+function adaptiveSchwelle(grau, w, h, fenster, abzug){
+  const W1 = w + 1; const integ = new Float64Array(W1 * (h + 1));
+  for (let y = 1; y <= h; y++) { let zeile = 0; for (let x = 1; x <= w; x++) { zeile += grau[(y - 1) * w + (x - 1)]; integ[y * W1 + x] = integ[(y - 1) * W1 + x] + zeile; } }
+  const out = new Uint8ClampedArray(w * h); const r = fenster >> 1;
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+      const anz = (x1 - x0 + 1) * (y1 - y0 + 1);
+      const s = integ[(y1 + 1) * W1 + (x1 + 1)] - integ[y0 * W1 + (x1 + 1)] - integ[(y1 + 1) * W1 + x0] + integ[y0 * W1 + x0];
+      out[y * w + x] = grau[y * w + x] < (s / anz - abzug) ? 0 : 255;
+    }
+  }
+  return out;
 }
 async function nummerAusKarte(karte){
   const w = await ocrBereit();
-  let erg = await w.recognize(streifenMachen(karte, false));
-  let nummer = nummerParsen(erg.data.text);
-  if (!nummer) { erg = await w.recognize(streifenMachen(karte, true)); nummer = nummerParsen(erg.data.text); }
-  return nummer;
+  const texte = [];
+  for (const teil of ['ganz', 'links', 'rechts']) {
+    const streifen = streifenMachen(karte, teil);
+    const erg = await w.recognize(streifen);
+    const nummer = nummerParsen(erg.data.text);
+    texte.push('[' + teil + '] ' + String(erg.data.text || '').trim().replace(/\s+/g, ' ').slice(0, 120));
+    if (Z.debug) debugZeigen(streifen, texte, nummer);
+    if (nummer) return nummer;
+  }
+  return null;
 }
+function debugZeigen(streifen, texte, nummer){
+  const c = $('#debugStreifen'); c.width = streifen.width; c.height = streifen.height; c.getContext('2d').drawImage(streifen, 0, 0);
+  $('#debugText').textContent = (nummer ? 'Gelesen: ' + nummer.anzeige + (nummer.sicher ? ' (sicher)' : ' (unsicher)') : 'Keine Nummer gefunden') + '\n' + texte.join('\n');
+}
+$('#debugSchalter').addEventListener('change', (ev) => { Z.debug = ev.target.checked; $('#debug').hidden = !Z.debug; });
 function nummerParsen(text){
   const t = String(text || '').toUpperCase().replace(/[^A-Z0-9\/\n ]/g, ' ');
   const fix = (s) => s.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/Z(?=\d)/g, '2');
@@ -292,7 +347,8 @@ function nummerParsen(text){
     const zaehler = parseInt(pa[2], 10), nenner = parseInt(pb[2], 10);
     if (!nenner || nenner > 400 || nenner < 10) continue;
     if (!pa[1] && zaehler > nenner + 80) continue;
-    return { lokal: pa[1] + pa[2], praefix: pa[1], zahl: zaehler, nenner: nenner, anzeige: pa[1] + pa[2] + '/' + pb[1] + pb[2] };
+    const sicher = fix(m[1]) === m[1] && fix(m[2]) === m[2] && zaehler <= nenner + 30;
+    return { lokal: pa[1] + pa[2], praefix: pa[1], zahl: zaehler, nenner: nenner, anzeige: pa[1] + pa[2] + '/' + pb[1] + pb[2], sicher: sicher };
   }
   const promo = /\b(SWSH|SVP|SV|SM|XY|BW|DP|HGSS)\s?(\d{2,3})\b/.exec(t);
   if (promo) return { lokal: promo[1] + promo[2], praefix: promo[1], zahl: parseInt(promo[2], 10), nenner: 0, anzeige: promo[1] + promo[2], promo: true };
@@ -513,7 +569,7 @@ function urteilZeichnen(){
 function knopf(text, klasse, handler){ const b = document.createElement('button'); b.type = 'button'; b.className = klasse; b.textContent = text; b.addEventListener('click', handler); return b; }
 function scanZuruecksetzen(ignorierNummer){
   clearTimeout(Z.autoTimer); Z.autoTimer = null;
-  Z.aktuell = null; Z.aktuellBild = ''; Z.aktuellTreffer = null; Z.letztesUrteil = ''; Z.letzteLesung = ''; Z.lesungZaehler = 0;
+  Z.aktuell = null; Z.aktuellBild = ''; Z.aktuellTreffer = null; Z.letztesUrteil = ''; Z.letzteLesung = ''; Z.lesungZaehler = 0; Z.lesungen = [];
   if (ignorierNummer) { Z.ignoriere = String(ignorierNummer).toUpperCase(); Z.ignoriereBis = Date.now() + 6000; }
   $('#ergebnis').hidden = true; $('#gelesen').hidden = true; rahmen.classList.remove('treffer');
   Z.pause = false;

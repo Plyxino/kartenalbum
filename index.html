@@ -80,6 +80,8 @@
       <div class="scan-optionen">
         <label class="schalter"><input type="checkbox" id="schnellmodus"><span>Schnellmodus: neue Karten sofort speichern, Doppelte nur melden</span></label>
         <form class="manuell" id="formManuell"><input type="text" id="manuellNummer" placeholder="Nummer von Hand, z. B. 025/198" aria-label="Kartennummer"><button type="submit" class="zweit">Suchen</button></form>
+        <label class="schalter"><input type="checkbox" id="debugSchalter"><span>Zeigen, was die App liest (hilft beim Nachbessern)</span></label>
+        <div class="debug" id="debug" hidden><canvas id="debugStreifen"></canvas><pre id="debugText">Noch nichts gelesen.</pre></div>
       </div>
 
       <!-- Ergebnis -->
