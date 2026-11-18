@@ -210,7 +210,7 @@ $('#knopfLicht').addEventListener('click', async () => {
   try { await Kamera.spur.applyConstraints({ advanced: [{ torch: Kamera.licht }] }); } catch (e) { toast('Licht geht bei dieser Kamera nicht.'); }
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) kameraStoppen(); });
-function schleifeStarten(){ clearInterval(Kamera.timer); Kamera.timer = setInterval(scanSchritt, 400); }
+function schleifeStarten(){ clearInterval(Kamera.timer); Kamera.timer = setInterval(scanSchritt, 120); }
 
 function quellRahmen(qw, qh){
   const bw = scanner.clientWidth, bh = scanner.clientHeight;
@@ -240,8 +240,8 @@ async function scanSchritt(){
     const nummer = await nummerAusKarte(karte);
     if (nummer) Kamera.fehlversuche = 0; else if (!Z.pause) {
       Kamera.fehlversuche = (Kamera.fehlversuche || 0) + 1;
-      if (Kamera.fehlversuche === 6) scanStatusSetzen('Tipp: Karte flach hinlegen, näher ran, bis sie den Rahmen füllt, und gutes Licht ohne Spiegelung.');
-      if (Kamera.fehlversuche === 14) scanStatusSetzen('Die Nummer unten muss scharf sein. Kurz still halten, oder unten von Hand eintippen.');
+      if (Kamera.fehlversuche === 6) scanStatusSetzen('Tipp: Karte flach hinlegen, näher ran, bis sie den Rahmen füllt. Glänzt sie? Licht aus und die Karte leicht kippen, bis die Nummer nicht spiegelt.');
+      if (Kamera.fehlversuche === 14) scanStatusSetzen('Die Nummer unten muss scharf sein. Kurz still halten, unten von Hand eintippen, oder „Ohne Nummer“ für Münzen und alte Energien.');
       if (Kamera.fehlversuche > 20) Kamera.fehlversuche = 0;
     }
     await lesungVerarbeiten(nummer, karte);
@@ -253,20 +253,23 @@ async function lesungVerarbeiten(nummer, karte){
   if (!nummer) { g.hidden = true; return; }
   g.textContent = nummer.anzeige; g.hidden = false;
   if (Z.ignoriere === nummer.anzeige && Date.now() < Z.ignoriereBis) return;
-  // Eine Nummer gilt erst, wenn sie zweimal gleich gelesen wurde (innerhalb der letzten vier Lesungen).
-  // Eine einzelne Lesung reicht nie: eine 5 sieht schnell wie eine 8 aus, und 18/18 passt genauso gut zu einem Set wie 15/18.
+  // Zweimal dieselbe Nummer (innerhalb der letzten vier Lesungen) gilt immer.
+  // Eine saubere, plausible Einzel-Lesung darf schon vorgeprüft werden: Sie zählt nur, wenn Name/KP/Bild sie bestätigen.
   Z.lesungen.push(nummer.anzeige); if (Z.lesungen.length > 4) Z.lesungen.shift();
   const gleiche = Z.lesungen.filter(x => x === nummer.anzeige).length;
-  if (gleiche < 2) { if (gleiche === 1) scanStatusSetzen(nummer.anzeige + ' gelesen, kurz still halten …'); return; }
   const plausibel = await nennerPlausibel(nummer);
+  if (gleiche === 1) {
+    if (plausibel && nummer.sicher) { await nummerErkannt(nummer, karte, true); return; }
+    scanStatusSetzen(nummer.anzeige + ' gelesen, kurz still halten …'); return;
+  }
   if (!plausibel && !nummer.sicher && gleiche < 3) { scanStatusSetzen(nummer.anzeige + ' gelesen, bin noch nicht sicher …'); return; }
-  Z.lesungen = []; await nummerErkannt(nummer, karte);
+  Z.lesungen = []; await nummerErkannt(nummer, karte, false);
 }
 async function nennerPlausibel(nummer){
   if (nummer.promo) return true;
   try {
-    const sets = await setsLaden('de');
-    return sets.some(s => s.cardCount && (s.cardCount.official === nummer.nenner || s.cardCount.total === nummer.nenner));
+    const sets = await setsAlle();
+    return sets.liste.some(s => s.cardCount && (s.cardCount.official === nummer.nenner || s.cardCount.total === nummer.nenner));
   } catch (e) { return true; }
 }
 
@@ -279,14 +282,14 @@ function ocrBereit(){
   scanStatusSetzen('Lade Texterkennung (einmalig) …');
   ocrLaden = (async () => {
     const w = await Tesseract.createWorker('eng', 1, { logger: () => {} });
-    await w.setParameters({ tessedit_char_whitelist: ZEICHEN_NUMMER, tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' });
+    await w.setParameters({ tessedit_char_whitelist: ZEICHEN_NUMMER, tessedit_pageseg_mode: '6', preserve_interword_spaces: '1', tessedit_do_invert: '0' });
     ocrWorker = w; return w;
   })();
   ocrLaden.catch(() => { ocrLaden = null; });
   return ocrLaden;
 }
 /* Ein Ausschnitt der Karte als Schwarz-Weiß-Bild (vergrößert, lokale Schwelle, helle Schrift wird umgedreht). */
-function schwarzweiss(karte, sx, sy, sw, sh, zielBreite){
+function schwarzweiss(karte, sx, sy, sw, sh, zielBreite, fenster, abzug){
   const faktor = zielBreite / sw, rand = 24;
   const zw = Math.round(sw * faktor), zh = Math.round(sh * faktor);
   const ziel = document.createElement('canvas'); ziel.width = zw + 2 * rand; ziel.height = zh + 2 * rand;
@@ -296,7 +299,7 @@ function schwarzweiss(karte, sx, sy, sw, sh, zielBreite){
   const img = c.getImageData(rand, rand, zw, zh); const p = img.data; const n = zw * zh;
   const grau = new Uint8ClampedArray(n);
   for (let i = 0, j = 0; i < p.length; i += 4, j++) grau[j] = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000;
-  const bw = adaptiveSchwelle(grau, zw, zh, 31, 10);
+  const bw = adaptiveSchwelle(grau, zw, zh, fenster || 31, abzug == null ? 10 : abzug);
   let schwarz = 0; for (let j = 0; j < n; j++) if (bw[j] === 0) schwarz++;
   const umdrehen = schwarz > n / 2; // Schrift ist die Minderheit: helle Schrift auf dunklem Grund umdrehen
   for (let i = 0, j = 0; i < p.length; i += 4, j++) { const v = umdrehen ? 255 - bw[j] : bw[j]; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
@@ -304,12 +307,12 @@ function schwarzweiss(karte, sx, sy, sw, sh, zielBreite){
   return ziel;
 }
 /* Streifen: unterer Teil der Karte (dort steht die Nummer). Teil = ganz, links oder rechts. */
-function streifenMachen(karte, teil){
+function streifenMachen(karte, teil, glanz){
   const W = karte.width, H = karte.height;
   const sy = Math.round(H * 0.83), sh = H - sy;
   const bereiche = { ganz: [0, W], links: [0, Math.round(W * 0.58)], rechts: [Math.round(W * 0.42), W] };
   const b = bereiche[teil] || bereiche.ganz;
-  return schwarzweiss(karte, b[0], sy, b[1] - b[0], sh, 1500 * (b[1] - b[0]) / W);
+  return schwarzweiss(karte, b[0], sy, b[1] - b[0], sh, 1500 * (b[1] - b[0]) / W, glanz ? 51 : 31, glanz ? 5 : 10);
 }
 /* Namensstreifen: oberer Rand der Karte, dort steht der Name (hinter „Basis“/„Phase“, vor den KP). */
 function namensStreifen(karte){
@@ -334,11 +337,15 @@ function adaptiveSchwelle(grau, w, h, fenster, abzug){
 async function nummerAusKarte(karte){
   const w = await ocrBereit();
   const texte = [];
-  for (const teil of ['ganz', 'links', 'rechts']) {
-    const streifen = streifenMachen(karte, teil);
+  // Reihenfolge nach Häufigkeit: neue Karten unten links, alte unten rechts. Der ganze Streifen nur jedes zweite Mal (spart Zeit).
+  Kamera.schritt = (Kamera.schritt || 0) + 1;
+  const glanz = ((Kamera.fehlversuche || 0) % 4) >= 2; // bei Fehlversuchen abwechselnd weichere Schwelle gegen Glanz
+  const teile = ['links', 'rechts']; if (Kamera.schritt % 2 === 0 || !Kamera.aktiv) teile.push('ganz');
+  for (const teil of teile) {
+    const streifen = streifenMachen(karte, teil, glanz);
     const text = await textLesen(w, streifen, ZEICHEN_NUMMER);
     const nummer = nummerParsen(text);
-    texte.push('[' + teil + '] ' + text.trim().replace(/\s+/g, ' ').slice(0, 120));
+    texte.push('[' + teil + (glanz ? ', weich' : '') + '] ' + text.trim().replace(/\s+/g, ' ').slice(0, 120));
     if (Z.debug) debugZeigen(streifen, texte, nummer);
     if (nummer) return nummer;
   }
@@ -414,7 +421,15 @@ function namensAehnlichkeit(gelesen, name){
 /* Kandidaten nach Namen bewerten. Rückgabe: Liste mit .name (0..1), absteigend sortiert. */
 function namenAbgleichen(gelesen, kandidaten){
   const lesbar = buchstaben(gelesen).length >= 4;
-  const liste = kandidaten.map(k => ({ karte: k, name: lesbar ? namensAehnlichkeit(gelesen, k.name) : 0, kp: null, bild: null, details: null, punkte: 0 }));
+  const liste = kandidaten.map(k => {
+    const namen = k.namen && k.namen.length ? k.namen : [k.name];
+    let best = 0, bestName = namen[0];
+    if (lesbar) namen.forEach(n => { const s = namensAehnlichkeit(gelesen, n); if (s > best) { best = s; bestName = n; } });
+    // Sprache nach dem Namen wählen, der auf der Karte steht (deutsche oder englische Karte)
+    let sprache = k.sprache || 'de';
+    if (lesbar && k.nameEn && k.nameDe && bestName === k.nameEn && best >= 0.65 && namensAehnlichkeit(gelesen, k.nameDe) < best - 0.15) sprache = 'en';
+    return { karte: k, name: best, kp: null, bild: null, details: null, punkte: 0, sprache: sprache, ohneName: false };
+  });
   liste.sort((a, b) => b.name - a.name);
   return { liste: liste, lesbar: lesbar };
 }
@@ -465,13 +480,15 @@ function probenBewerten(eintrag, lesbar){
 function probenUrteil(liste, lesbar){
   const b = liste[0]; if (!b) return 'passt nicht';
   const z = liste[1];
-  const nameKlar = lesbar && b.name >= 0.65 && (!z || b.name - z.name >= 0.2);
+  // Energiekarten tragen oben keinen Namen, nur „Energie“: Der Name zählt dort nicht.
+  const lesbarB = lesbar && !b.ohneName;
+  const nameKlar = lesbarB && b.name >= 0.65 && (!z || b.name - z.name >= 0.2);
   if (nameKlar && b.kp !== false) return 'passt';
   if (nameKlar && b.name >= 0.85) return 'passt';
-  if (lesbar && b.name < 0.4 && b.bild != null && b.bild < 0.3) return 'passt nicht';
-  if (lesbar && b.name < 0.4 && b.bild == null) return 'passt nicht';
+  if (lesbarB && b.name < 0.4 && b.bild != null && b.bild < 0.3) return 'passt nicht';
+  if (lesbarB && b.name < 0.4 && b.bild == null) return 'passt nicht';
   if (b.kp === false && b.bild != null && b.bild < 0.2) return 'passt nicht';
-  if (!lesbar && b.bild != null && b.bild >= 0.55 && b.kp !== false && (!z || z.bild == null || b.bild - z.bild >= 0.15)) return 'passt';
+  if (!lesbarB && b.bild != null && b.bild >= 0.55 && b.kp !== false && (!z || z.bild == null || b.bild - z.bild >= 0.15)) return 'passt';
   return 'unklar';
 }
 function pruefText(nummer, eintrag, lesbar, genau){
@@ -491,24 +508,38 @@ async function setsLaden(sprache){
   const liste = await r.json(); DB.sets[sprache] = liste; lokalSchreiben('ks_sets_' + sprache, { zeit: Date.now(), liste: liste });
   return liste;
 }
+async function setsAlle(){
+  const [de, en] = await Promise.all([setsLaden('de').catch(() => []), setsLaden('en').catch(() => [])]);
+  const map = new Map(); en.forEach(s => map.set(s.id, s)); de.forEach(s => map.set(s.id, s));
+  return { map: map, liste: Array.from(map.values()), reihenfolge: new Map(en.map((s, i) => [s.id, i])) };
+}
+/* Kandidaten in beiden Sprachen suchen (Deutsch hat weniger Sets als Englisch) und nach Karten-ID zusammenführen. */
 async function kandidatenSuchen(nummer){
-  for (const sprache of ['de', 'en']) {
-    const sets = await setsLaden(sprache); const setMap = new Map(sets.map(s => [s.id, s])); const idx = new Map(sets.map((s, i) => [s.id, i]));
-    const r = await fetch(DB.basis + '/' + sprache + '/cards?localId=' + encodeURIComponent(nummer.lokal));
-    if (!r.ok) continue;
-    let karten = await r.json(); if (!Array.isArray(karten)) karten = [];
-    const ziel = normLokal(nummer.lokal);
-    karten = karten.filter(k => normLokal(k.localId) === ziel);
-    karten.forEach(k => { k.setId = k.id.slice(0, k.id.lastIndexOf('-')); k.set = setMap.get(k.setId) || null; k.sprache = sprache; });
-    if (!karten.length) continue;
-    let passend = karten;
-    if (nummer.nenner) passend = karten.filter(k => k.set && k.set.cardCount && (k.set.cardCount.official === nummer.nenner || k.set.cardCount.total === nummer.nenner));
-    const genau = passend.length > 0;
-    if (!passend.length) passend = karten;
-    passend.sort((a, b) => (idx.get(b.setId) || 0) - (idx.get(a.setId) || 0));
-    return { passend: passend, sprache: sprache, genau: genau };
-  }
-  return { passend: [], sprache: 'de', genau: false };
+  const sets = await setsAlle();
+  const ziel = normLokal(nummer.lokal);
+  const holen = async (sprache) => {
+    try {
+      const r = await fetch(DB.basis + '/' + sprache + '/cards?localId=' + encodeURIComponent(nummer.lokal)); if (!r.ok) return [];
+      const l = await r.json(); return Array.isArray(l) ? l.filter(k => normLokal(k.localId) === ziel) : [];
+    } catch (e) { return []; }
+  };
+  const [de, en] = await Promise.all([holen('de'), holen('en')]);
+  const nachId = new Map();
+  en.forEach(k => nachId.set(k.id, { id: k.id, localId: k.localId, name: k.name, nameDe: '', nameEn: k.name, image: k.image, sprache: 'en' }));
+  de.forEach(k => {
+    const e = nachId.get(k.id);
+    if (e) { e.name = k.name; e.nameDe = k.name; e.sprache = 'de'; if (!e.image) e.image = k.image; }
+    else nachId.set(k.id, { id: k.id, localId: k.localId, name: k.name, nameDe: k.name, nameEn: '', image: k.image, sprache: 'de' });
+  });
+  const karten = Array.from(nachId.values());
+  karten.forEach(k => { k.setId = k.id.slice(0, k.id.lastIndexOf('-')); k.set = sets.map.get(k.setId) || null; k.namen = [k.nameDe, k.nameEn].filter(Boolean); });
+  if (!karten.length) return { passend: [], sprache: 'de', genau: false };
+  let passend = karten;
+  if (nummer.nenner) passend = karten.filter(k => k.set && k.set.cardCount && (k.set.cardCount.official === nummer.nenner || k.set.cardCount.total === nummer.nenner));
+  const genau = passend.length > 0;
+  if (!passend.length) passend = karten;
+  passend.sort((a, b) => (sets.reihenfolge.get(b.setId) || 0) - (sets.reihenfolge.get(a.setId) || 0));
+  return { passend: passend, sprache: 'de', genau: genau };
 }
 async function karteDetails(id, sprache){ const r = await fetch(DB.basis + '/' + sprache + '/cards/' + id); if (!r.ok) throw new Error('karte'); return r.json(); }
 async function setDetails(setId, sprache){
@@ -536,19 +567,30 @@ async function karteAusDb(kurz, sprache, details){
 }
 
 /* ---------- Nummer erkannt → Karte suchen ---------- */
-async function nummerErkannt(nummer, karteCanvas){
-  Z.pause = true; rahmen.classList.add('treffer'); piep('tick');
+async function detailsHolen(id, sprache){
+  try { return { d: await karteDetails(id, sprache), sprache: sprache }; } catch (e) {}
+  const andere = sprache === 'de' ? 'en' : 'de';
+  try { return { d: await karteDetails(id, andere), sprache: andere }; } catch (e) { return { d: null, sprache: sprache }; }
+}
+async function nummerErkannt(nummer, karteCanvas, einzel){
+  Z.pause = true; rahmen.classList.add('treffer'); if (!einzel) piep('tick');
   scanStatusSetzen('Nummer ' + nummer.anzeige + ' erkannt, prüfe Karte …');
   const foto = karteCanvas ? miniatur(karteCanvas) : '';
+  const weiterLesen = (text) => { scanStatusSetzen(text); Z.pause = false; rahmen.classList.remove('treffer'); };
   try {
+    // Kopfzeile lesen, während die Datenbank antwortet (läuft parallel)
+    const kopfP = karteCanvas ? kopfLesen(karteCanvas) : Promise.resolve({ text: '', kp: null });
     const erg = await kandidatenSuchen(nummer);
-    if (!erg.passend.length) { ergebnisLeer(nummer, foto); return; }
-    // Gegenproben: Name und KP oben auf der Karte, dazu das Bild im Vergleich mit der Datenbank.
-    const kopf = karteCanvas ? await kopfLesen(karteCanvas) : { text: '', kp: null };
+    if (!erg.passend.length) {
+      if (einzel) { weiterLesen(nummer.anzeige + ' gelesen, noch nicht in der Datenbank gefunden, lese weiter …'); return; }
+      ergebnisLeer(nummer, foto); return;
+    }
+    const kopf = await kopfP;
     const ab = namenAbgleichen(kopf.text, erg.passend);
     const top = ab.liste.slice(0, 3);
     await Promise.all(top.map(async (e) => {
-      try { e.details = await karteDetails(e.karte.id, erg.sprache); } catch (x) { e.details = null; }
+      const dh = await detailsHolen(e.karte.id, e.sprache); e.details = dh.d; e.sprache = dh.sprache;
+      e.ohneName = !!(e.details && /energ/i.test(e.details.category || ''));
       if (kopf.kp && e.details && e.details.hp) e.kp = Number(e.details.hp) === kopf.kp;
       if (karteCanvas && e.karte.image) e.bild = await bildAehnlichkeit(karteCanvas, e.karte.image + '/low.webp');
       probenBewerten(e, ab.lesbar);
@@ -556,14 +598,14 @@ async function nummerErkannt(nummer, karteCanvas){
     top.sort((a, b) => b.punkte - a.punkte);
     const urteil = probenUrteil(top, ab.lesbar);
     const beste = top[0];
-    if (Z.debug) $('#debugText').textContent += '\n[kopf] ' + kopf.text.trim().replace(/\s+/g, ' ').slice(0, 80) + ' | KP ' + (kopf.kp || '?') + ' → ' + urteil + ' (' + beste.karte.name + ': Name ' + Math.round(beste.name * 100) + ' %, KP ' + beste.kp + ', Bild ' + (beste.bild == null ? '–' : beste.bild.toFixed(2)) + ')';
+    if (Z.debug) $('#debugText').textContent += '\n[kopf] ' + kopf.text.trim().replace(/\s+/g, ' ').slice(0, 80) + ' | KP ' + (kopf.kp || '?') + ' → ' + urteil + (einzel ? ' (Einzel-Lesung)' : '') + ' (' + beste.karte.name + ': Name ' + Math.round(beste.name * 100) + ' %, KP ' + beste.kp + ', Bild ' + (beste.bild == null ? '–' : beste.bild.toFixed(2)) + ')';
     const geordnet = top.map(x => x.karte).concat(ab.liste.slice(3).map(x => x.karte));
     if (urteil === 'passt nicht') {
       // Nummer wahrscheinlich falsch gelesen (z. B. 15 als 18). Noch einmal von vorn lesen; beim dritten Mal darf man selbst wählen.
       Z.namensAblehnung = (Z.namensAblehnung && Z.namensAblehnung.nummer === nummer.anzeige) ? { nummer: nummer.anzeige, anzahl: Z.namensAblehnung.anzahl + 1 } : { nummer: nummer.anzeige, anzahl: 1 };
       if (Z.namensAblehnung.anzahl < 3) {
-        scanStatusSetzen('Nummer ' + nummer.anzeige + ' gelesen, aber Name oder KP passen nicht zu „' + beste.karte.name + '“. Ich lese noch einmal, kurz still halten …');
-        Z.lesungen = []; Z.pause = false; rahmen.classList.remove('treffer');
+        Z.lesungen = [];
+        weiterLesen('Nummer ' + nummer.anzeige + ' gelesen, aber Name oder KP passen nicht zu „' + beste.karte.name + '“. Ich lese noch einmal, kurz still halten …');
         return;
       }
       erg.passend = geordnet;
@@ -571,12 +613,14 @@ async function nummerErkannt(nummer, karteCanvas){
       return;
     }
     Z.namensAblehnung = null;
-    const annehmen = urteil === 'passt' || (urteil === 'unklar' && erg.passend.length === 1 && erg.genau && beste.kp !== false);
+    const annehmen = urteil === 'passt' || (!einzel && urteil === 'unklar' && erg.passend.length === 1 && erg.genau && beste.kp !== false);
     if (annehmen) {
-      const karte = await karteAusDb(beste.karte, erg.sprache, beste.details);
-      karte.pruefung = pruefText(nummer, beste, ab.lesbar, erg.genau);
+      Z.lesungen = []; piep('tick');
+      const karte = await karteAusDb(beste.karte, beste.sprache, beste.details);
+      karte.pruefung = pruefText(nummer, beste, ab.lesbar && !beste.ohneName, erg.genau);
       ergebnisZeigen(karte, foto); return;
     }
+    if (einzel) { weiterLesen(nummer.anzeige + ' gelesen, prüfe noch einmal …'); return; }
     erg.passend = geordnet;
     kandidatenZeigen(erg, foto, nummer);
   } catch (e) {
@@ -609,7 +653,7 @@ function kandidatenZeigen(erg, foto, nummer, hinweis){
       '<span>' + esc(k.name) + '</span><span class="hinweis">' + esc(k.set ? k.set.name : k.setId) + '</span>';
     b.addEventListener('click', async () => {
       $$('.kandidat').forEach(x => x.classList.toggle('aktiv', x === b)); b.disabled = true;
-      try { ergebnisZeigen(await karteAusDb(k, erg.sprache), Z.aktuellBild); } catch (e) { toast('Karte konnte nicht geladen werden.'); b.disabled = false; }
+      try { const dh = await detailsHolen(k.id, k.sprache || erg.sprache); ergebnisZeigen(await karteAusDb(k, dh.sprache, dh.d), Z.aktuellBild); } catch (e) { toast('Karte konnte nicht geladen werden.'); b.disabled = false; }
     });
     liste.appendChild(b);
   });
@@ -627,18 +671,37 @@ function ergebnisLeer(nummer, foto){
   a.appendChild(knopf('Mit Namen speichern', 'haupt', () => nameFragen(nummer, foto)));
   a.appendChild(knopf('Weiter scannen', 'leise', () => scanZuruecksetzen(nummer.anzeige)));
 }
-function nameFragen(nummer, foto){
-  const html = '<h2>Wie heißt die Karte?</h2><label class="feld">Name<input type="text" id="dlgName" maxlength="40"></label><label class="feld">Set (wenn du es weißt)<input type="text" id="dlgSet" maxlength="40"></label><label class="feld">Jahr auf der Karte<input type="number" id="dlgJahr" min="1996" max="2100"></label>';
+function nameFragen(nummer, foto){ ohneNummerFragen(foto, nummer); }
+/* Karte, Münze oder Energie ohne lesbare Nummer von Hand eintragen, mit Foto aus der Kamera. */
+function ohneNummerFragen(foto, nummer){
+  const n = nummer || { anzeige: '', lokal: '' };
+  Z.pause = true;
+  const html = '<h2>' + (n.anzeige ? 'Wie heißt die Karte?' : 'Ohne Nummer eintragen') + '</h2>' +
+    (foto ? '<img src="' + foto + '" alt="" class="vorschau">' : '') +
+    '<label class="feld">Name<input type="text" id="dlgName" maxlength="40" placeholder="z. B. Feuer-Energie, Pikachu-Münze"></label>' +
+    '<label class="feld">Was ist es?<select id="dlgArt"><option>Pokémon</option><option>Trainer</option><option>Energie</option><option>Münze</option><option>Sonstiges</option></select></label>' +
+    '<label class="feld">Set (wenn du es weißt)<input type="text" id="dlgSet" maxlength="40"></label>' +
+    '<label class="feld">Jahr auf der Karte<input type="number" id="dlgJahr" min="1996" max="2100"></label>';
   dialogZeigen(html, [
     knopf('Übernehmen', 'haupt', () => {
       const name = $('#dlgName').value.trim(); if (!name) { $('#dlgName').focus(); return; }
+      const art = $('#dlgArt').value;
       dialogSchliessen();
-      ergebnisZeigen({ name: name, nummer: nummer.anzeige, setname: $('#dlgSet').value.trim(), setcode: '', setId: '', localId: nummer.lokal, jahr: zahlOderNull($('#dlgJahr').value), datum: '', serie: '', seltenheit: '', typ: '', kp: null, art: 'Pokémon', stufe: '', besonderheit: 'keine', sprache: '', illustrator: '', bildDb: '' }, foto);
+      ergebnisZeigen({ name: name, nummer: n.anzeige, setname: $('#dlgSet').value.trim(), setcode: '', setId: '', localId: n.lokal, jahr: zahlOderNull($('#dlgJahr').value), datum: '', serie: '', seltenheit: '', typ: art === 'Energie' ? name.replace(/-?Energie/i, '').trim() : '', kp: null, art: art, stufe: '', besonderheit: 'keine', sprache: '', illustrator: '', bildDb: '' }, foto);
     }),
-    knopf('Abbrechen', 'leise', dialogSchliessen)
+    knopf('Abbrechen', 'leise', () => { dialogSchliessen(); if (!Z.aktuell) Z.pause = false; })
   ]);
   setTimeout(() => { const el = $('#dlgName'); if (el) el.focus(); }, 50);
 }
+$('#knopfOhneNummer').addEventListener('click', () => {
+  let foto = '';
+  try {
+    if (Kamera.aktiv && video.videoWidth) foto = miniatur(rahmenAusschneiden(video, video.videoWidth, video.videoHeight));
+    else if (!standbild.hidden && standbild.naturalWidth) foto = miniatur(rahmenAusschneiden(standbild, standbild.naturalWidth, standbild.naturalHeight));
+  } catch (e) { foto = ''; }
+  audioAn();
+  ohneNummerFragen(foto, null);
+});
 
 function ergebnisZeigen(karte, foto){
   Z.aktuell = karte; Z.letztesUrteil = '';
@@ -942,10 +1005,38 @@ function detailZeigen(k){
   const bilder = (k.bildDb ? '<img src="' + esc(k.bildDb) + '" alt="">' : '') + (k.bild ? '<img src="' + k.bild + '" alt="">' : '');
   const html = '<h2>' + esc(k.name) + '</h2><div class="detail"><div class="bilder">' + (bilder || '<div class="platz">kein Foto</div>') + '</div><dl>' + reihen.map(r => '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>').join('') + '<dt>Wert</dt><dd class="wert" id="detailWert">wird berechnet …</dd></dl></div>';
   const knoepfe = [knopf('Schließen', 'haupt', dialogSchliessen)];
+  if (k.setId) knoepfe.push(knopf('Ganzes Set ansehen', 'zweit', () => setUebersicht(k)));
   if ((k.anzahl || 1) > 1) knoepfe.push(knopf('Ein Exemplar entfernen', 'gefahr', () => entfernen(k, false)));
   knoepfe.push(knopf('Löschen', 'gefahr', () => loeschenFragen(k)));
   dialogZeigen(html, knoepfe);
   wertEintragen(k, $('#detailWert'));
+}
+/* Set-Übersicht: alle Karten eines Sets aus der Datenbank, die eigenen markiert, die fehlenden grau. */
+const SetVoll = {};
+async function setVollLaden(setId, sprache){
+  const key = sprache + ':' + setId; if (SetVoll[key]) return SetVoll[key];
+  for (const s of [sprache, sprache === 'de' ? 'en' : 'de']) {
+    try { const r = await fetch(DB.basis + '/' + s + '/sets/' + setId); if (r.ok) { const d = await r.json(); d.sprache = s; SetVoll[key] = d; return d; } } catch (e) {}
+  }
+  throw new Error('set');
+}
+async function setUebersicht(k){
+  const sprache = k.sprache === 'Englisch' ? 'en' : 'de';
+  dialogZeigen('<h2>' + esc(k.setname || k.setId) + '</h2><p class="hinweis">Lade das Set …</p>', [knopf('Schließen', 'leise', dialogSchliessen)]);
+  let set; try { set = await setVollLaden(k.setId, sprache); } catch (e) { $('#dialogInhalt').querySelector('.hinweis').textContent = 'Das Set konnte nicht geladen werden. Prüfe das Internet.'; return; }
+  const karten = (set.cards || []).slice().sort((a, b) => normLokal(a.localId).localeCompare(normLokal(b.localId), undefined, { numeric: true }));
+  const eigene = new Map(); Z.karten.filter(x => x.setId === k.setId).forEach(x => eigene.set(normLokal(x.localId), x));
+  const habe = karten.filter(c => eigene.has(normLokal(c.localId))).length;
+  const nurFehlende = { an: false };
+  const zeichnen = () => {
+    const liste = nurFehlende.an ? karten.filter(c => !eigene.has(normLokal(c.localId))) : karten;
+    const html = '<h2>' + esc(set.name || k.setname) + '</h2><p class="hinweis">Du hast <strong>' + habe + ' von ' + karten.length + '</strong> Karten' + (set.releaseDate ? ' · erschienen ' + esc(datumText(set.releaseDate)) : '') + '.' + (karten.length - habe > 0 ? ' Es fehlen noch ' + (karten.length - habe) + '.' : ' Das Set ist vollständig!') + '</p>' +
+      '<label class="schalter"><input type="checkbox" id="nurFehlende"' + (nurFehlende.an ? ' checked' : '') + '><span>Nur fehlende zeigen</span></label>' +
+      '<div class="setraster">' + liste.map(c => { const hab = eigene.get(normLokal(c.localId)); return '<div class="sk ' + (hab ? 'hab' : 'fehlt') + '" title="' + esc(c.name) + '">' + (c.image ? '<img src="' + esc(c.image) + '/low.webp" alt="" loading="lazy">' : '<div class="platz">?</div>') + (hab ? '<span class="haken">✓' + ((hab.anzahl || 1) > 1 ? ' ' + hab.anzahl + '×' : '') + '</span>' : '') + '<span class="sn">' + esc(c.localId) + ' ' + esc(c.name) + '</span></div>'; }).join('') + '</div>';
+    dialogZeigen(html, [knopf('Schließen', 'haupt', dialogSchliessen), knopf('Zurück zur Karte', 'leise', () => detailZeigen(k))]);
+    $('#nurFehlende').addEventListener('change', (ev) => { nurFehlende.an = ev.target.checked; zeichnen(); });
+  };
+  zeichnen();
 }
 function loeschenFragen(k){
   const n = k.anzahl || 1;
@@ -970,9 +1061,28 @@ async function kursHolen(){
 }
 function preisAusDetails(d){
   const cm = d && d.pricing && d.pricing.cardmarket; if (!cm) return null;
-  const werte = [cm.trend, cm.avg, cm.avg7, cm.avg30, cm['trend-holo'], cm['avg7-holo'], cm['avg-holo'], cm['avg30-holo'], cm.low];
-  const w = werte.find(v => typeof v === 'number' && v > 0);
-  return w ? { eur: w, stand: cm.updated || '' } : null;
+  const nimm = (...k) => { for (const x of k) { const v = cm[x]; if (typeof v === 'number' && v > 0) return v; } return null; };
+  const varianten = [];
+  const normal = nimm('trend', 'avg', 'avg7', 'avg30', 'low'); if (normal) varianten.push({ name: 'Normal', eur: normal });
+  const holo = nimm('trend-holo', 'avg-holo', 'avg7-holo', 'avg30-holo'); if (holo) varianten.push({ name: 'Holo', eur: holo });
+  const reverse = nimm('trend-reverse', 'avg-reverse', 'avg7-reverse', 'avg30-reverse'); if (reverse) varianten.push({ name: 'Reverse Holo', eur: reverse });
+  const erste = nimm('trend-firstEdition', 'avg-firstEdition', 'avg7-firstEdition'); if (erste) varianten.push({ name: '1. Edition', eur: erste });
+  if (!varianten.length) return null;
+  return { eur: varianten[0].eur, stand: cm.updated || '', varianten: varianten };
+}
+async function wertEintragen(k, el){
+  try {
+    const [preis, kurs] = await Promise.all([preisHolen(k), kursHolen()]);
+    if (!preis) { el.textContent = 'kein Preis bekannt' + (k.setId ? '' : ' (Karte ohne Nummer)'); return; }
+    // Glänzende Karte? Dann zählt der Holo-Preis, wenn es einen gibt.
+    const glanz = /holo|glänz|shiny|full art|illustration|rainbow|gold/i.test((k.besonderheit || '') + ' ' + (k.seltenheit || ''));
+    const haupt = (glanz && preis.varianten.find(v => v.name === 'Holo')) || preis.varianten[0];
+    const n = k.anzahl || 1;
+    el.innerHTML = '<strong>' + esc(geld(haupt.eur * kurs, 'CHF')) + '</strong> · ' + esc(geld(haupt.eur, '€')) + (k.jahr ? ' <span class="klein">(Ausgabe ' + esc(k.jahr) + (haupt.name !== 'Normal' ? ', ' + esc(haupt.name) : '') + ')</span>' : '') +
+      (preis.varianten.length > 1 ? '<br><span class="klein">Je nach Ausführung: ' + preis.varianten.map(v => esc(v.name) + ' ' + esc(geld(v.eur * kurs, 'CHF'))).join(' · ') + '</span>' : '') +
+      (n > 1 ? '<br><span class="klein">' + n + ' Stück zusammen: ' + esc(geld(haupt.eur * kurs * n, 'CHF')) + ' · ' + esc(geld(haupt.eur * n, '€')) + '</span>' : '') +
+      '<br><span class="klein">Cardmarket-Durchschnitt für genau diese Karte (Set und Nummer)' + (preis.stand ? ', Stand ' + esc(datumText(preis.stand)) : '') + '. Alter und Seltenheit stecken schon im Preis; der Zustand entscheidet den Rest.</span>';
+  } catch (e) { el.textContent = 'Preis gerade nicht abrufbar'; }
 }
 async function preisHolen(k){
   if (!k.setId || !k.localId) return null;
@@ -985,16 +1095,6 @@ async function preisHolen(k){
   return preis;
 }
 function geld(wert, waehrung){ return wert.toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + waehrung; }
-async function wertEintragen(k, el){
-  try {
-    const [preis, kurs] = await Promise.all([preisHolen(k), kursHolen()]);
-    if (!preis) { el.textContent = 'kein Preis bekannt'; return; }
-    const n = k.anzahl || 1;
-    el.innerHTML = '<strong>' + esc(geld(preis.eur * kurs, 'CHF')) + '</strong> · ' + esc(geld(preis.eur, '€')) +
-      (n > 1 ? '<br><span class="klein">' + n + ' Stück zusammen: ' + esc(geld(preis.eur * kurs * n, 'CHF')) + ' · ' + esc(geld(preis.eur * n, '€')) + '</span>' : '') +
-      '<br><span class="klein">Cardmarket-Durchschnitt' + (preis.stand ? ', Stand ' + esc(datumText(preis.stand)) : '') + '. Der echte Preis hängt vom Zustand ab.</span>';
-  } catch (e) { el.textContent = 'Preis gerade nicht abrufbar'; }
-}
 async function sammlungswertZeigen(knopfEl){
   if (!Z.karten.length) { toast('Noch keine Karten in der Sammlung.'); return; }
   knopfEl.disabled = true; const urtext = knopfEl.textContent;
@@ -1039,5 +1139,5 @@ async function start(){
 }
 start();
 // Nur zum Testen am PC (localhost): Lesefunktionen von außen erreichbar machen.
-if (location.hostname === 'localhost') window.__kartenTest = { nummerAusKarte, kopfLesen, namenAbgleichen, namensAehnlichkeit, bildAehnlichkeit, nummerErkannt, nummerParsen, streifenMachen, namensStreifen, preisHolen, kursHolen, Z };
+if (location.hostname === 'localhost') window.__kartenTest = { nummerAusKarte, kopfLesen, namenAbgleichen, namensAehnlichkeit, bildAehnlichkeit, nummerErkannt, nummerParsen, streifenMachen, namensStreifen, preisHolen, kursHolen, kandidatenSuchen, setsAlle, setUebersicht, Z };
 })();

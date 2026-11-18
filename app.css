@@ -183,3 +183,15 @@ dialog::backdrop{background:rgba(10,14,24,.55)}
 .sammlungswert strong{font-weight:500;color:var(--akzent)}
 .detail .bilder{display:flex;flex-direction:column;gap:8px;align-items:flex-start}
 .detail .bilder img{width:150px;max-width:100%;border-radius:8px}
+
+/* Set-Übersicht und Vorschau beim Eintragen ohne Nummer */
+.setraster{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:10px;margin-top:12px;max-height:60vh;overflow:auto;padding:2px}
+.setraster .sk{position:relative;display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--tinte2)}
+.setraster .sk img,.setraster .sk .platz{width:100%;aspect-ratio:63/88;object-fit:cover;border-radius:6px;border:1px solid var(--linie);background:var(--flaeche2)}
+.setraster .sk .platz{display:flex;align-items:center;justify-content:center}
+.setraster .sk.fehlt img{filter:grayscale(1);opacity:.4}
+.setraster .sk.hab img{box-shadow:0 0 0 2px #2f9a5c}
+.setraster .haken{position:absolute;top:4px;right:4px;background:#2f9a5c;color:#fff;border-radius:999px;padding:1px 6px;font-size:11px}
+.setraster .sn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dialog-inhalt .vorschau{width:110px;aspect-ratio:63/88;object-fit:cover;border-radius:8px;border:1px solid var(--linie);display:block;margin:0 0 10px}
+.feld select{width:100%;padding:10px 12px;border:1px solid var(--linie);border-radius:10px;background:var(--flaeche);color:var(--tinte);font:inherit}
