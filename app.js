@@ -150,7 +150,7 @@ $('#knopfAbmelden').addEventListener('click', () => {
 /* ---------- Modus ---------- */
 const ERKL = {
   scannen: 'Kamera starten und die Karte in den Rahmen halten. Die App liest die Nummer unten auf der Karte, holt Name, Set und Jahr aus der Kartendatenbank und sagt dir, ob du sie schon hast.',
-  tauschen: 'Jemand bietet dir eine Karte an? Halte sie in den Rahmen. Du siehst, ob du sie schon hast oder ob sich der Tausch lohnt. Gespeichert wird nichts, außer du willst es.',
+  tauschen: 'Halte eine Karte in den Rahmen. Die App sagt nur: Ja, hast du schon, oder Nein, hast du noch nicht. Gespeichert wird nichts.',
   loeschen: 'Halte eine Karte in den Rahmen, die du weggegeben hast, und nimm sie aus der Sammlung.'
 };
 function modusSetzen(m){
@@ -314,7 +314,7 @@ function streifenMachen(karte, teil){
 /* Namensstreifen: oberer Rand der Karte, dort steht der Name (hinter „Basis“/„Phase“, vor den KP). */
 function namensStreifen(karte){
   const W = karte.width, H = karte.height;
-  return schwarzweiss(karte, 0, Math.round(H * 0.02), Math.round(W * 0.84), Math.round(H * 0.095), 1500 * 0.84);
+  return schwarzweiss(karte, 0, Math.round(H * 0.02), Math.round(W * 0.95), Math.round(H * 0.095), 1500 * 0.95);
 }
 function adaptiveSchwelle(grau, w, h, fenster, abzug){
   const W1 = w + 1; const integ = new Float64Array(W1 * (h + 1));
@@ -368,16 +368,22 @@ function nummerParsen(text){
 }
 
 
-/* ---------- Namen oben auf der Karte lesen und mit der Datenbank vergleichen ---------- */
+/* ---------- Gegenproben: Name und KP oben auf der Karte lesen, Bild mit der Datenbank vergleichen ---------- */
 const ZEICHEN_NUMMER = '0123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ ';
-const ZEICHEN_NAME = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüéÉ\'-. ';
+const ZEICHEN_KOPF = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüéÉ0123456789\'-. ';
 let ocrZeichen = ZEICHEN_NUMMER;
 async function textLesen(w, bild, zeichen){
-  if (ocrZeichen !== zeichen) { await w.setParameters({ tessedit_char_whitelist: zeichen, tessedit_pageseg_mode: zeichen === ZEICHEN_NAME ? '7' : '6' }); ocrZeichen = zeichen; }
+  if (ocrZeichen !== zeichen) { await w.setParameters({ tessedit_char_whitelist: zeichen, tessedit_pageseg_mode: '6' }); ocrZeichen = zeichen; }
   const erg = await w.recognize(bild); return String(erg.data.text || '');
 }
-async function nameAusKarte(karte){
-  try { const w = await ocrBereit(); return await textLesen(w, namensStreifen(karte), ZEICHEN_NAME); } catch (e) { return ''; }
+/* Kopfzeile lesen: Name und KP. KP ist die letzte Zahl rechts, immer ein Vielfaches von 10. */
+async function kopfLesen(karte){
+  let text = '';
+  try { const w = await ocrBereit(); text = await textLesen(w, namensStreifen(karte), ZEICHEN_KOPF); } catch (e) { text = ''; }
+  let kp = null;
+  const zahlen = (text.match(/\d{2,3}/g) || []).map(Number).filter(z => z % 10 === 0 && z >= 30 && z <= 340);
+  if (zahlen.length) kp = zahlen[zahlen.length - 1];
+  return { text: text, kp: kp };
 }
 function buchstaben(s){
   return String(s || '').toUpperCase().replace(/Ä/g, 'A').replace(/Ö/g, 'O').replace(/Ü/g, 'U').replace(/É|È/g, 'E').replace(/[^A-Z]/g, '');
@@ -405,16 +411,74 @@ function namensAehnlichkeit(gelesen, name){
   }
   return Math.max(0, 1 - best / z.length);
 }
-/* Kandidaten nach Namen bewerten. Rückgabe: Liste mit .passung (0..1), absteigend sortiert, plus Urteil über den besten. */
+/* Kandidaten nach Namen bewerten. Rückgabe: Liste mit .name (0..1), absteigend sortiert. */
 function namenAbgleichen(gelesen, kandidaten){
   const lesbar = buchstaben(gelesen).length >= 4;
-  const liste = kandidaten.map(k => ({ karte: k, passung: lesbar ? namensAehnlichkeit(gelesen, k.name) : 0 }));
-  liste.sort((a, b) => b.passung - a.passung);
-  const beste = liste[0] ? liste[0].passung : 0, zweite = liste[1] ? liste[1].passung : 0;
-  let urteil = 'unklar';
-  if (lesbar && beste >= 0.65 && (beste - zweite >= 0.2 || liste.length === 1)) urteil = 'passt';
-  else if (lesbar && beste < 0.4) urteil = 'passt nicht';
-  return { liste: liste, urteil: urteil, lesbar: lesbar, beste: beste };
+  const liste = kandidaten.map(k => ({ karte: k, name: lesbar ? namensAehnlichkeit(gelesen, k.name) : 0, kp: null, bild: null, details: null, punkte: 0 }));
+  liste.sort((a, b) => b.name - a.name);
+  return { liste: liste, lesbar: lesbar };
+}
+
+/* Bildvergleich: Das Bildfeld der Karte (ohne Rand und Text) grob verkleinern und mit dem Datenbankbild vergleichen. */
+const BildCache = new Map();
+function bildLaden(url){
+  if (BildCache.has(url)) return BildCache.get(url);
+  const p = new Promise((res) => {
+    const im = new Image(); im.crossOrigin = 'anonymous';
+    const t = setTimeout(() => res(null), 5000);
+    im.onload = () => { clearTimeout(t); res(im); }; im.onerror = () => { clearTimeout(t); res(null); };
+    im.src = url;
+  });
+  BildCache.set(url, p); return p;
+}
+function bildMerkmale(quelle, qw, qh){
+  const grob = document.createElement('canvas'); grob.width = 48; grob.height = 36;
+  grob.getContext('2d').drawImage(quelle, qw * 0.08, qh * 0.11, qw * 0.84, qh * 0.36, 0, 0, 48, 36);
+  const c = document.createElement('canvas'); c.width = 24; c.height = 18; const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
+  x.drawImage(grob, 0, 0, 24, 18);
+  const d = x.getImageData(0, 0, 24, 18).data; const grau = [], farbe = [];
+  for (let i = 0; i < d.length; i += 4) { grau.push((d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000); farbe.push(d[i], d[i + 1], d[i + 2]); }
+  return { grau: grau, farbe: farbe };
+}
+function korrelation(a, b){
+  const n = Math.min(a.length, b.length); if (!n) return 0;
+  let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+  let sab = 0, saa = 0, sbb = 0;
+  for (let i = 0; i < n; i++) { const da = a[i] - ma, db = b[i] - mb; sab += da * db; saa += da * da; sbb += db * db; }
+  if (!saa || !sbb) return 0;
+  return sab / Math.sqrt(saa * sbb);
+}
+async function bildAehnlichkeit(karte, url){
+  try {
+    const im = await bildLaden(url); if (!im || !im.naturalWidth) return null;
+    const A = bildMerkmale(karte, karte.width, karte.height), B = bildMerkmale(im, im.naturalWidth, im.naturalHeight);
+    return 0.6 * korrelation(A.grau, B.grau) + 0.4 * korrelation(A.farbe, B.farbe);
+  } catch (e) { return null; }
+}
+/* Alle Proben zu einem Urteil zusammenfassen. */
+function probenBewerten(eintrag, lesbar){
+  let p = eintrag.name * 0.6;
+  if (eintrag.kp === true) p += 0.15; else if (eintrag.kp === false) p -= 0.2;
+  if (eintrag.bild != null) p += Math.max(-0.25, Math.min(0.25, eintrag.bild * 0.25));
+  eintrag.punkte = p; return p;
+}
+function probenUrteil(liste, lesbar){
+  const b = liste[0]; if (!b) return 'passt nicht';
+  const z = liste[1];
+  const nameKlar = lesbar && b.name >= 0.65 && (!z || b.name - z.name >= 0.2);
+  if (nameKlar && b.kp !== false) return 'passt';
+  if (nameKlar && b.name >= 0.85) return 'passt';
+  if (lesbar && b.name < 0.4 && b.bild != null && b.bild < 0.3) return 'passt nicht';
+  if (lesbar && b.name < 0.4 && b.bild == null) return 'passt nicht';
+  if (b.kp === false && b.bild != null && b.bild < 0.2) return 'passt nicht';
+  if (!lesbar && b.bild != null && b.bild >= 0.55 && b.kp !== false && (!z || z.bild == null || b.bild - z.bild >= 0.15)) return 'passt';
+  return 'unklar';
+}
+function pruefText(nummer, eintrag, lesbar, genau){
+  const haken = (ok) => ok === true ? '✓' : ok === false ? '✗' : '?';
+  const teile = ['Nummer ' + haken(true), 'Set-Größe ' + haken(genau ? true : null), 'Name ' + haken(!lesbar ? null : eintrag.name >= 0.65 ? true : eintrag.name < 0.4 ? false : null), 'KP ' + haken(eintrag.kp)];
+  if (eintrag.bild != null) teile.push('Bild ' + haken(eintrag.bild >= 0.45 ? true : eintrag.bild < 0.1 ? false : null));
+  return 'Geprüft: ' + teile.join(' · ');
 }
 
 /* ---------- Kartendatenbank (TCGdex, kostenlos) ---------- */
@@ -455,8 +519,8 @@ async function setDetails(setId, sprache){
   const kurz = { id: setId, name: d.name || '', releaseDate: d.releaseDate || '', serie: d.serie ? d.serie.name : '', official: d.cardCount ? d.cardCount.official : null, total: d.cardCount ? d.cardCount.total : null };
   DB.setDetails[k] = kurz; lokalSchreiben('ks_set_' + k, kurz); return kurz;
 }
-async function karteAusDb(kurz, sprache){
-  const d = await karteDetails(kurz.id, sprache); const s = await setDetails(d.set.id, sprache);
+async function karteAusDb(kurz, sprache, details){
+  const d = details || await karteDetails(kurz.id, sprache); const s = await setDetails(d.set.id, sprache);
   const official = (d.set.cardCount && d.set.cardCount.official) || s.official;
   const bes = [];
   if (d.suffix) bes.push(d.suffix);
@@ -474,31 +538,46 @@ async function karteAusDb(kurz, sprache){
 /* ---------- Nummer erkannt → Karte suchen ---------- */
 async function nummerErkannt(nummer, karteCanvas){
   Z.pause = true; rahmen.classList.add('treffer'); piep('tick');
-  scanStatusSetzen('Nummer ' + nummer.anzeige + ' erkannt, suche Karte …');
+  scanStatusSetzen('Nummer ' + nummer.anzeige + ' erkannt, prüfe Karte …');
   const foto = karteCanvas ? miniatur(karteCanvas) : '';
   try {
     const erg = await kandidatenSuchen(nummer);
     if (!erg.passend.length) { ergebnisLeer(nummer, foto); return; }
-    // Gegenprobe: Der Name oben auf der Karte muss zur gefundenen Karte passen.
-    const gelesenerName = karteCanvas ? await nameAusKarte(karteCanvas) : '';
-    const ab = namenAbgleichen(gelesenerName, erg.passend);
-    if (Z.debug) $('#debugText').textContent += '\n[name] ' + gelesenerName.trim().replace(/\s+/g, ' ').slice(0, 80) + ' → ' + ab.urteil + (ab.liste[0] ? ' (' + ab.liste[0].karte.name + ' ' + Math.round(ab.liste[0].passung * 100) + ' %)' : '');
-    if (ab.urteil === 'passt nicht') {
-      // Nummer wahrscheinlich falsch gelesen (z. B. 15 als 18). Noch einmal von vorn lesen; beim dritten Mal darf Sean selbst wählen.
+    // Gegenproben: Name und KP oben auf der Karte, dazu das Bild im Vergleich mit der Datenbank.
+    const kopf = karteCanvas ? await kopfLesen(karteCanvas) : { text: '', kp: null };
+    const ab = namenAbgleichen(kopf.text, erg.passend);
+    const top = ab.liste.slice(0, 3);
+    await Promise.all(top.map(async (e) => {
+      try { e.details = await karteDetails(e.karte.id, erg.sprache); } catch (x) { e.details = null; }
+      if (kopf.kp && e.details && e.details.hp) e.kp = Number(e.details.hp) === kopf.kp;
+      if (karteCanvas && e.karte.image) e.bild = await bildAehnlichkeit(karteCanvas, e.karte.image + '/low.webp');
+      probenBewerten(e, ab.lesbar);
+    }));
+    top.sort((a, b) => b.punkte - a.punkte);
+    const urteil = probenUrteil(top, ab.lesbar);
+    const beste = top[0];
+    if (Z.debug) $('#debugText').textContent += '\n[kopf] ' + kopf.text.trim().replace(/\s+/g, ' ').slice(0, 80) + ' | KP ' + (kopf.kp || '?') + ' → ' + urteil + ' (' + beste.karte.name + ': Name ' + Math.round(beste.name * 100) + ' %, KP ' + beste.kp + ', Bild ' + (beste.bild == null ? '–' : beste.bild.toFixed(2)) + ')';
+    const geordnet = top.map(x => x.karte).concat(ab.liste.slice(3).map(x => x.karte));
+    if (urteil === 'passt nicht') {
+      // Nummer wahrscheinlich falsch gelesen (z. B. 15 als 18). Noch einmal von vorn lesen; beim dritten Mal darf man selbst wählen.
       Z.namensAblehnung = (Z.namensAblehnung && Z.namensAblehnung.nummer === nummer.anzeige) ? { nummer: nummer.anzeige, anzahl: Z.namensAblehnung.anzahl + 1 } : { nummer: nummer.anzeige, anzahl: 1 };
       if (Z.namensAblehnung.anzahl < 3) {
-        scanStatusSetzen('Nummer ' + nummer.anzeige + ' gelesen, aber der Name oben passt nicht zu „' + ab.liste[0].karte.name + '“. Ich lese noch einmal, kurz still halten …');
+        scanStatusSetzen('Nummer ' + nummer.anzeige + ' gelesen, aber Name oder KP passen nicht zu „' + beste.karte.name + '“. Ich lese noch einmal, kurz still halten …');
         Z.lesungen = []; Z.pause = false; rahmen.classList.remove('treffer');
         return;
       }
-      erg.passend = ab.liste.map(x => x.karte);
-      kandidatenZeigen(erg, foto, nummer, 'Der Name oben auf der Karte passt zu keiner davon. Vielleicht wurde die Nummer falsch gelesen. Ist deine Karte dabei?');
+      erg.passend = geordnet;
+      kandidatenZeigen(erg, foto, nummer, 'Name und KP oben auf der Karte passen zu keiner davon. Vielleicht wurde die Nummer falsch gelesen. Ist deine Karte dabei?');
       return;
     }
     Z.namensAblehnung = null;
-    if (ab.urteil === 'passt') { ergebnisZeigen(await karteAusDb(ab.liste[0].karte, erg.sprache), foto); return; }
-    if (erg.passend.length === 1 && erg.genau) { ergebnisZeigen(await karteAusDb(erg.passend[0], erg.sprache), foto); return; }
-    erg.passend = ab.liste.map(x => x.karte);
+    const annehmen = urteil === 'passt' || (urteil === 'unklar' && erg.passend.length === 1 && erg.genau && beste.kp !== false);
+    if (annehmen) {
+      const karte = await karteAusDb(beste.karte, erg.sprache, beste.details);
+      karte.pruefung = pruefText(nummer, beste, ab.lesbar, erg.genau);
+      ergebnisZeigen(karte, foto); return;
+    }
+    erg.passend = geordnet;
     kandidatenZeigen(erg, foto, nummer);
   } catch (e) {
     scanStatusSetzen('Kartendatenbank nicht erreichbar. Prüfe das Internet.'); toast('Kartendatenbank nicht erreichbar.', 3500);
@@ -511,6 +590,7 @@ function ergebnisGrund(foto){
   const f = $('#ergFoto'); if (foto) { f.src = foto; f.hidden = false; } else { f.hidden = true; f.removeAttribute('src'); }
   $('#ergBildDb').hidden = true; $('#ergBildDb').removeAttribute('src');
   $('#ergPlatz').hidden = !!foto;
+  $('#ergPruefung').hidden = true;
   $('#aktionen').innerHTML = '';
   Z.aktuellBild = foto || '';
   e.scrollIntoView({ behavior: ruhig ? 'auto' : 'smooth', block: 'start' });
@@ -569,6 +649,7 @@ function ergebnisZeigen(karte, foto){
   $('#ergZeile1').textContent = [karte.nummer, karte.setname, karte.serie && karte.serie !== karte.setname ? karte.serie : ''].filter(Boolean).join(' · ');
   $('#ergZeile2').textContent = [karte.jahr, karte.seltenheit, karte.typ, karte.kp ? karte.kp + ' KP' : ''].filter(Boolean).join(' · ');
   $('#ergZeile3').textContent = [karte.besonderheit && karte.besonderheit !== 'keine' ? karte.besonderheit : '', karte.stufe, karte.illustrator, karte.sprache].filter(Boolean).join(' · ');
+  const pz = $('#ergPruefung'); pz.textContent = karte.pruefung || ''; pz.hidden = !karte.pruefung;
   scanStatusSetzen(karte.name + ' gefunden');
   urteilZeichnen();
 }
@@ -605,19 +686,19 @@ function urteilZeichnen(){
   const andereText = erg.andere.length ? '<p class="klein">Vom gleichen Pokémon hast du schon ' + erg.andere.length + ' andere Karte' + (erg.andere.length > 1 ? 'n' : '') + ' (andere Nummer oder anderes Set). Das zählt nicht als doppelt.</p>' : '';
   if (erg.status === 'neu') {
     u.className = 'urteil neu';
-    if (m === 'tauschen') u.innerHTML = '<h3>Hast du noch nicht. Tausch lohnt sich!</h3><p>' + bez(k) + ' fehlt in deiner Sammlung.</p>' + andereText;
+    if (m === 'tauschen') u.innerHTML = '<h3>Nein, hast du noch nicht.</h3><p>' + bez(k) + '</p>' + andereText;
     else if (m === 'loeschen') u.innerHTML = '<h3>Nicht in deiner Sammlung</h3><p>' + bez(k) + ' ist nicht gespeichert.</p>' + andereText;
     else u.innerHTML = '<h3>Neu! Die hast du noch nicht.</h3><p>' + bez(k) + '</p>' + andereText;
   } else if (erg.status === 'aelter') {
     const t = erg.treffer; u.className = 'urteil aelter';
     const text = '<p>Du hast diese Karte schon, aber die Ausgabe von ' + esc(t.jahr) + '. Diese hier ist von ' + esc(k.jahr) + ', also älter.</p>';
-    if (m === 'tauschen') u.innerHTML = '<h3>Ältere Ausgabe. Tausch lohnt sich!</h3>' + text;
+    if (m === 'tauschen') u.innerHTML = '<h3>Ja, hast du schon, aber nur die neuere Ausgabe.</h3>' + text;
     else if (m === 'loeschen') u.innerHTML = '<h3>Ähnliche Karte gefunden</h3>' + text + '<p class="klein">Gespeichert ist: ' + bez(t) + ' (' + t.anzahl + '×)</p>';
     else u.innerHTML = '<h3>Ältere Ausgabe! Zählt als neue Karte.</h3>' + text;
   } else {
     const t = erg.treffer, seit = datumText(t.hinzugefuegt); u.className = 'urteil doppelt';
     const text = '<p>' + bez(t) + (t.jahr ? ' · ' + esc(t.jahr) : '') + '</p><p class="klein">' + (t.anzahl > 1 ? 'Du hast sie schon ' + t.anzahl + '-mal' : 'Du hast sie schon einmal') + (seit ? ', seit ' + seit : '') + '.</p>' + andereText;
-    if (m === 'tauschen') u.innerHTML = '<h3>Hast du schon. Lieber nicht tauschen.</h3>' + text;
+    if (m === 'tauschen') u.innerHTML = '<h3>Ja, hast du schon' + (t.anzahl > 1 ? ' (' + t.anzahl + '×)' : '') + '.</h3>' + text;
     else if (m === 'loeschen') u.innerHTML = '<h3>Gefunden</h3>' + text;
     else u.innerHTML = '<h3>Doppelt! Die hast du schon.</h3>' + text;
   }
@@ -635,9 +716,9 @@ function urteilZeichnen(){
       else { scanStatusSetzen('Neu: ' + k.name + ' wird gespeichert …'); Z.autoTimer = setTimeout(() => speichern(false), 1000); }
     }
   } else if (m === 'tauschen') {
+    // Beim Tauschen nur die Antwort: Ja oder Nein. Danach geht es von allein weiter.
     a.appendChild(knopf('Weiter scannen', 'haupt', weiter));
-    if (erg.status !== 'doppelt') a.appendChild(knopf('Getauscht, jetzt speichern', 'zweit', () => speichern(false)));
-    else a.appendChild(knopf('Trotzdem speichern (als Doppelte)', 'leise', () => speichern(true)));
+    if (Kamera.aktiv) { clearTimeout(Z.autoTimer); scanStatusSetzen((erg.status === 'neu' ? 'Nein: ' : 'Ja: ') + k.name + '. Nächste Karte …'); Z.autoTimer = setTimeout(weiter, 4000); }
   } else if (m === 'loeschen') {
     if (erg.treffer) {
       const t = erg.treffer;
@@ -859,11 +940,12 @@ function detailZeigen(k){
   const reihen = [['Nummer', k.nummer], ['Set', k.setname], ['Serie', k.serie], ['Jahr', k.jahr], ['Erschienen', datumText(k.datum)], ['Art', k.art], ['Typ', k.typ], ['KP', k.kp], ['Stufe', k.stufe], ['Seltenheit', k.seltenheit], ['Besonderheit', k.besonderheit], ['Sprache', k.sprache], ['Illustrator', k.illustrator], ['Anzahl', (k.anzahl || 1) + '×'], ['Gespeichert am', datumText(k.hinzugefuegt)]]
     .filter(r => r[1] !== '' && r[1] != null);
   const bilder = (k.bildDb ? '<img src="' + esc(k.bildDb) + '" alt="">' : '') + (k.bild ? '<img src="' + k.bild + '" alt="">' : '');
-  const html = '<h2>' + esc(k.name) + '</h2><div class="detail"><div class="bilder">' + (bilder || '<div class="platz">kein Foto</div>') + '</div><dl>' + reihen.map(r => '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>').join('') + '</dl></div>';
+  const html = '<h2>' + esc(k.name) + '</h2><div class="detail"><div class="bilder">' + (bilder || '<div class="platz">kein Foto</div>') + '</div><dl>' + reihen.map(r => '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>').join('') + '<dt>Wert</dt><dd class="wert" id="detailWert">wird berechnet …</dd></dl></div>';
   const knoepfe = [knopf('Schließen', 'haupt', dialogSchliessen)];
   if ((k.anzahl || 1) > 1) knoepfe.push(knopf('Ein Exemplar entfernen', 'gefahr', () => entfernen(k, false)));
   knoepfe.push(knopf('Löschen', 'gefahr', () => loeschenFragen(k)));
   dialogZeigen(html, knoepfe);
+  wertEintragen(k, $('#detailWert'));
 }
 function loeschenFragen(k){
   const n = k.anzahl || 1;
@@ -874,6 +956,60 @@ function loeschenFragen(k){
   knoepfe.push(knopf('Abbrechen', 'leise', dialogSchliessen));
   dialogZeigen(html, knoepfe);
 }
+
+
+/* ---------- Kartenwert (Cardmarket-Preise über TCGdex, Umrechnung in Franken) ---------- */
+async function kursHolen(){
+  const c = lokalLesen('ks_kurs');
+  if (c && Date.now() - c.zeit < 86400e3) return c.chf;
+  try {
+    const r = await fetch('https://api.frankfurter.dev/v1/latest?base=EUR&symbols=CHF'); const d = await r.json();
+    const chf = d && d.rates && d.rates.CHF; if (chf) { lokalSchreiben('ks_kurs', { zeit: Date.now(), chf: chf }); return chf; }
+  } catch (e) {}
+  return c ? c.chf : 0.93;
+}
+function preisAusDetails(d){
+  const cm = d && d.pricing && d.pricing.cardmarket; if (!cm) return null;
+  const werte = [cm.trend, cm.avg, cm.avg7, cm.avg30, cm['trend-holo'], cm['avg7-holo'], cm['avg-holo'], cm['avg30-holo'], cm.low];
+  const w = werte.find(v => typeof v === 'number' && v > 0);
+  return w ? { eur: w, stand: cm.updated || '' } : null;
+}
+async function preisHolen(k){
+  if (!k.setId || !k.localId) return null;
+  const id = k.setId + '-' + k.localId, sprache = k.sprache === 'Englisch' ? 'en' : 'de';
+  const c = lokalLesen('ks_preis_' + id); if (c && Date.now() - c.zeit < 43200e3) return c.preis;
+  let preis = null;
+  try { preis = preisAusDetails(await karteDetails(id, sprache)); } catch (e) { preis = null; }
+  if (!preis && sprache === 'de') { try { preis = preisAusDetails(await karteDetails(id, 'en')); } catch (e) {} }
+  lokalSchreiben('ks_preis_' + id, { zeit: Date.now(), preis: preis });
+  return preis;
+}
+function geld(wert, waehrung){ return wert.toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + waehrung; }
+async function wertEintragen(k, el){
+  try {
+    const [preis, kurs] = await Promise.all([preisHolen(k), kursHolen()]);
+    if (!preis) { el.textContent = 'kein Preis bekannt'; return; }
+    const n = k.anzahl || 1;
+    el.innerHTML = '<strong>' + esc(geld(preis.eur * kurs, 'CHF')) + '</strong> · ' + esc(geld(preis.eur, '€')) +
+      (n > 1 ? '<br><span class="klein">' + n + ' Stück zusammen: ' + esc(geld(preis.eur * kurs * n, 'CHF')) + ' · ' + esc(geld(preis.eur * n, '€')) + '</span>' : '') +
+      '<br><span class="klein">Cardmarket-Durchschnitt' + (preis.stand ? ', Stand ' + esc(datumText(preis.stand)) : '') + '. Der echte Preis hängt vom Zustand ab.</span>';
+  } catch (e) { el.textContent = 'Preis gerade nicht abrufbar'; }
+}
+async function sammlungswertZeigen(knopfEl){
+  if (!Z.karten.length) { toast('Noch keine Karten in der Sammlung.'); return; }
+  knopfEl.disabled = true; const urtext = knopfEl.textContent;
+  try {
+    const kurs = await kursHolen(); let summe = 0, ohne = 0, fertig = 0;
+    for (const k of Z.karten) {
+      knopfEl.textContent = 'Rechne … ' + (++fertig) + '/' + Z.karten.length;
+      const p = await preisHolen(k); if (p) summe += p.eur * (k.anzahl || 1); else ohne++;
+    }
+    const el = $('#sammlungswert'); el.hidden = false;
+    el.innerHTML = 'Deine Sammlung ist ungefähr <strong>' + esc(geld(summe * kurs, 'CHF')) + '</strong> wert (' + esc(geld(summe, '€')) + ').' + (ohne ? ' Für ' + ohne + ' Karte' + (ohne > 1 ? 'n' : '') + ' gibt es keinen Preis.' : '');
+    neuAnimieren(el, 'pop');
+  } finally { knopfEl.disabled = false; knopfEl.textContent = urtext; }
+}
+$('#knopfWert').addEventListener('click', (ev) => sammlungswertZeigen(ev.currentTarget));
 
 /* ---------- Konfetti ---------- */
 function konfetti(){
@@ -903,5 +1039,5 @@ async function start(){
 }
 start();
 // Nur zum Testen am PC (localhost): Lesefunktionen von außen erreichbar machen.
-if (location.hostname === 'localhost') window.__kartenTest = { nummerAusKarte, nameAusKarte, namenAbgleichen, namensAehnlichkeit, nummerErkannt, nummerParsen, streifenMachen, namensStreifen, Z };
+if (location.hostname === 'localhost') window.__kartenTest = { nummerAusKarte, kopfLesen, namenAbgleichen, namensAehnlichkeit, bildAehnlichkeit, nummerErkannt, nummerParsen, streifenMachen, namensStreifen, preisHolen, kursHolen, Z };
 })();

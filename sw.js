@@ -1,5 +1,5 @@
 /* Service Worker: App-Dateien offline bereithalten. Datenbank und Bilder kommen immer frisch aus dem Netz. */
-const VERSION = 'kartenalbum-v3';
+const VERSION = 'kartenalbum-v4';
 const DATEIEN = ['./', './index.html', './app.css', './app.js', './manifest.webmanifest', './icon-180.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
