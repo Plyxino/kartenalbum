@@ -1050,25 +1050,51 @@ function loeschenFragen(k){
 
 
 /* ---------- Kartenwert (Cardmarket-Preise über TCGdex, Umrechnung in Franken) ---------- */
-async function kursHolen(){
-  const c = lokalLesen('ks_kurs');
-  if (c && Date.now() - c.zeit < 86400e3) return c.chf;
+async function kurseHolen(){
+  const c = lokalLesen('ks_kurs2');
+  if (c && Date.now() - c.zeit < 86400e3) return c;
   try {
-    const r = await fetch('https://api.frankfurter.dev/v1/latest?base=EUR&symbols=CHF'); const d = await r.json();
-    const chf = d && d.rates && d.rates.CHF; if (chf) { lokalSchreiben('ks_kurs', { zeit: Date.now(), chf: chf }); return chf; }
+    const r = await fetch('https://api.frankfurter.dev/v1/latest?base=EUR&symbols=CHF,USD'); const d = await r.json();
+    if (d && d.rates && d.rates.CHF && d.rates.USD) { const k = { zeit: Date.now(), chf: d.rates.CHF, usdEur: 1 / d.rates.USD }; lokalSchreiben('ks_kurs2', k); return k; }
   } catch (e) {}
-  return c ? c.chf : 0.93;
+  return c || { chf: 0.93, usdEur: 0.86 };
 }
-function preisAusDetails(d){
-  const cm = d && d.pricing && d.pricing.cardmarket; if (!cm) return null;
+async function kursHolen(){ return (await kurseHolen()).chf; }
+/* Preis aus den Kartendaten: Cardmarket (Euro) und TCGplayer (Dollar) nebeneinander.
+   Widersprechen sich die beiden Quellen stark, ist meist ein Eintrag falsch verknüpft; dann gilt der niedrigere. */
+function preisAusDetails(d, usdEur){
+  const p = d && d.pricing; if (!p) return null;
+  const cm = p.cardmarket || null, tp = p.tcgplayer || null; usdEur = usdEur || 0.86;
   const nimm = (...k) => { for (const x of k) { const v = cm[x]; if (typeof v === 'number' && v > 0) return v; } return null; };
-  const varianten = [];
-  const normal = nimm('trend', 'avg', 'avg7', 'avg30', 'low'); if (normal) varianten.push({ name: 'Normal', eur: normal });
-  const holo = nimm('trend-holo', 'avg-holo', 'avg7-holo', 'avg30-holo'); if (holo) varianten.push({ name: 'Holo', eur: holo });
-  const reverse = nimm('trend-reverse', 'avg-reverse', 'avg7-reverse', 'avg30-reverse'); if (reverse) varianten.push({ name: 'Reverse Holo', eur: reverse });
-  const erste = nimm('trend-firstEdition', 'avg-firstEdition', 'avg7-firstEdition'); if (erste) varianten.push({ name: '1. Edition', eur: erste });
+  const namen = ['Normal', 'Holo', 'Reverse Holo', '1. Edition'];
+  const vonCm = {}, vonTp = {};
+  if (cm) {
+    vonCm['Normal'] = nimm('trend', 'avg', 'avg7', 'avg30', 'low');
+    vonCm['Holo'] = nimm('trend-holo', 'avg-holo', 'avg7-holo', 'avg30-holo');
+    vonCm['Reverse Holo'] = nimm('trend-reverse', 'avg-reverse', 'avg7-reverse', 'avg30-reverse');
+    vonCm['1. Edition'] = nimm('trend-firstEdition', 'avg-firstEdition', 'avg7-firstEdition');
+  }
+  if (tp) {
+    const tpWert = (k) => { const v = tp[k]; if (!v) return null; const z = [v.marketPrice, v.midPrice, v.lowPrice].find(x => typeof x === 'number' && x > 0); return z ? z * usdEur : null; };
+    vonTp['Normal'] = tpWert('normal') || tpWert('unlimited');
+    vonTp['Holo'] = tpWert('holofoil') || tpWert('unlimited-holofoil');
+    vonTp['Reverse Holo'] = tpWert('reverse-holofoil');
+    vonTp['1. Edition'] = tpWert('1st-edition-holofoil') || tpWert('1st-edition');
+  }
+  // Ausführungen, die es laut Datenbank für diese Karte gar nicht gibt, weglassen
+  const va = d.variants || {};
+  const gibtEs = { 'Normal': va.normal !== false, 'Holo': va.holo !== false, 'Reverse Holo': va.reverse !== false, '1. Edition': va.firstEdition !== false };
+  let varianten = [], unsicher = false, quellen = new Set();
+  for (const name of namen) {
+    const a = vonCm[name] || null, b = vonTp[name] || null; if (!a && !b) continue;
+    let eur = a || b, quelle = a ? 'Cardmarket' : 'TCGplayer', streit = false;
+    if (a && b && Math.max(a, b) / Math.min(a, b) > 3) { eur = Math.min(a, b); quelle = a < b ? 'Cardmarket' : 'TCGplayer'; streit = true; }
+    varianten.push({ name: name, eur: eur, quelle: quelle, gibtEs: gibtEs[name], streit: streit });
+  }
+  const echte = varianten.filter(v => v.gibtEs); if (echte.length) varianten = echte;
   if (!varianten.length) return null;
-  return { eur: varianten[0].eur, stand: cm.updated || '', varianten: varianten };
+  varianten.forEach(v => { quellen.add(v.quelle); if (v.streit) unsicher = true; });
+  return { eur: varianten[0].eur, stand: (cm && cm.updated) || (tp && tp.updated) || '', varianten: varianten, unsicher: unsicher, quelle: [...quellen].join(' und ') };
 }
 async function wertEintragen(k, el){
   try {
@@ -1081,17 +1107,19 @@ async function wertEintragen(k, el){
     el.innerHTML = '<strong>' + esc(geld(haupt.eur * kurs, 'CHF')) + '</strong> · ' + esc(geld(haupt.eur, '€')) + (k.jahr ? ' <span class="klein">(Ausgabe ' + esc(k.jahr) + (haupt.name !== 'Normal' ? ', ' + esc(haupt.name) : '') + ')</span>' : '') +
       (preis.varianten.length > 1 ? '<br><span class="klein">Je nach Ausführung: ' + preis.varianten.map(v => esc(v.name) + ' ' + esc(geld(v.eur * kurs, 'CHF'))).join(' · ') + '</span>' : '') +
       (n > 1 ? '<br><span class="klein">' + n + ' Stück zusammen: ' + esc(geld(haupt.eur * kurs * n, 'CHF')) + ' · ' + esc(geld(haupt.eur * n, '€')) + '</span>' : '') +
-      '<br><span class="klein">Cardmarket-Durchschnitt für genau diese Karte (Set und Nummer)' + (preis.stand ? ', Stand ' + esc(datumText(preis.stand)) : '') + '. Alter und Seltenheit stecken schon im Preis; der Zustand entscheidet den Rest.</span>';
+      '<br><span class="klein">Durchschnittspreis von ' + esc(preis.quelle) + ' für genau diese Karte (Set und Nummer)' + (preis.stand ? ', Stand ' + esc(datumText(preis.stand)) : '') + '. Alter und Seltenheit stecken schon im Preis; der Zustand entscheidet den Rest.' +
+      (preis.unsicher ? ' Die beiden Preisquellen widersprechen sich bei dieser Karte stark, darum zählt der niedrigere Preis.' : '') + '</span>';
   } catch (e) { el.textContent = 'Preis gerade nicht abrufbar'; }
 }
 async function preisHolen(k){
   if (!k.setId || !k.localId) return null;
   const id = k.setId + '-' + k.localId, sprache = k.sprache === 'Englisch' ? 'en' : 'de';
-  const c = lokalLesen('ks_preis_' + id); if (c && Date.now() - c.zeit < 43200e3) return c.preis;
+  const c = lokalLesen('ks_preis2_' + id); if (c && Date.now() - c.zeit < 43200e3) return c.preis;
+  const kurse = await kurseHolen();
   let preis = null;
-  try { preis = preisAusDetails(await karteDetails(id, sprache)); } catch (e) { preis = null; }
-  if (!preis && sprache === 'de') { try { preis = preisAusDetails(await karteDetails(id, 'en')); } catch (e) {} }
-  lokalSchreiben('ks_preis_' + id, { zeit: Date.now(), preis: preis });
+  try { preis = preisAusDetails(await karteDetails(id, sprache), kurse.usdEur); } catch (e) { preis = null; }
+  if (!preis && sprache === 'de') { try { preis = preisAusDetails(await karteDetails(id, 'en'), kurse.usdEur); } catch (e) {} }
+  lokalSchreiben('ks_preis2_' + id, { zeit: Date.now(), preis: preis });
   return preis;
 }
 function geld(wert, waehrung){ return wert.toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + waehrung; }
@@ -1139,5 +1167,5 @@ async function start(){
 }
 start();
 // Nur zum Testen am PC (localhost): Lesefunktionen von außen erreichbar machen.
-if (location.hostname === 'localhost') window.__kartenTest = { nummerAusKarte, kopfLesen, namenAbgleichen, namensAehnlichkeit, bildAehnlichkeit, nummerErkannt, nummerParsen, streifenMachen, namensStreifen, preisHolen, kursHolen, kandidatenSuchen, setsAlle, setUebersicht, Z };
+if (location.hostname === 'localhost') window.__kartenTest = { preisAusDetails, kurseHolen, nummerAusKarte, kopfLesen, namenAbgleichen, namensAehnlichkeit, bildAehnlichkeit, nummerErkannt, nummerParsen, streifenMachen, namensStreifen, preisHolen, kursHolen, kandidatenSuchen, setsAlle, setUebersicht, Z };
 })();
