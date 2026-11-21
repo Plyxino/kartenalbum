@@ -1084,6 +1084,8 @@ function preisAusDetails(d, usdEur){
   // Ausführungen, die es laut Datenbank für diese Karte gar nicht gibt, weglassen
   const va = d.variants || {};
   const gibtEs = { 'Normal': va.normal !== false, 'Holo': va.holo !== false, 'Reverse Holo': va.reverse !== false, '1. Edition': va.firstEdition !== false };
+  // Gibt es die Karte gar nicht als Normal, ist der Cardmarket-Grundpreis der Preis der einzigen Ausführung (Holo oder 1. Edition)
+  if (!gibtEs['Normal'] && vonCm['Normal']) { const ziel = namen.find(n => n !== 'Normal' && gibtEs[n]); if (ziel && !vonCm[ziel]) vonCm[ziel] = vonCm['Normal']; }
   let varianten = [], unsicher = false, quellen = new Set();
   for (const name of namen) {
     const a = vonCm[name] || null, b = vonTp[name] || null; if (!a && !b) continue;
@@ -1114,12 +1116,12 @@ async function wertEintragen(k, el){
 async function preisHolen(k){
   if (!k.setId || !k.localId) return null;
   const id = k.setId + '-' + k.localId, sprache = k.sprache === 'Englisch' ? 'en' : 'de';
-  const c = lokalLesen('ks_preis2_' + id); if (c && Date.now() - c.zeit < 43200e3) return c.preis;
+  const c = lokalLesen('ks_preis3_' + id); if (c && Date.now() - c.zeit < 43200e3) return c.preis;
   const kurse = await kurseHolen();
   let preis = null;
   try { preis = preisAusDetails(await karteDetails(id, sprache), kurse.usdEur); } catch (e) { preis = null; }
   if (!preis && sprache === 'de') { try { preis = preisAusDetails(await karteDetails(id, 'en'), kurse.usdEur); } catch (e) {} }
-  lokalSchreiben('ks_preis2_' + id, { zeit: Date.now(), preis: preis });
+  lokalSchreiben('ks_preis3_' + id, { zeit: Date.now(), preis: preis });
   return preis;
 }
 function geld(wert, waehrung){ return wert.toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + waehrung; }
